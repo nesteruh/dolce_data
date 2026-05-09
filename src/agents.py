@@ -153,11 +153,15 @@ def _format_full_response(data: dict) -> str:
     suggestions = data.get("suggestions", [])
     if suggestions:
         parts.append("\n**Suggestions:**")
-        for i, item in enumerate(suggestions, 1):
+        count = 0
+        for item in suggestions:
             text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            count += 1
             risk = str(item.get("risk", "LOW")).upper()
             rationale = str(item.get("rationale", "")).strip()
-            line = f"{i}. **[{risk}]** {text}"
+            line = f"{count}. **[{risk}]** {text}"
             if rationale:
                 line += f"  \n   *{rationale}*"
             parts.append(line)
@@ -512,6 +516,11 @@ def run_network_agent(
         is enabled, whether a VPN is active and could be causing slowdown, and
         whether any port is exposed unexpectedly. Give specific, data-driven
         suggestions. Use the SUGGESTION format for each action.
+
+        NOTE: Some sections may show "access denied" or "ERROR" — those sections have
+        no usable data. Do NOT generate a suggestion for a section with no data.
+        Only produce suggestions you can fully describe using values present above.
+        If fewer than 3 actionable items exist, return only the ones you can justify.
     """)
 
     llm_text = _llm_call(client, model, _NETWORK_SYSTEM, user_msg, history)
