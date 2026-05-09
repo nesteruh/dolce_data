@@ -22,14 +22,6 @@ from pathlib import Path
 import psutil
 
 
-def _safe_run(reg: CommandRegistry, cmd_id: str, **params) -> str:
-    """Run a CMD_ID and return its output, or empty string if the ID is missing."""
-    try:
-        return reg.run(cmd_id, **params)
-    except (ValueError, RuntimeError):
-        return ""
-
-
 def detect_os() -> str:
     """Return 'macos', 'linux', or 'windows'."""
     p = sys.platform
@@ -102,6 +94,41 @@ def _ps(cmd: str, timeout: int = 8) -> str:
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
         timeout=timeout,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Safe-to-delete catalogue (macOS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class SafeDeletableItem:
+    description: str
+    path: str
+    size: str
+    delete_cmd: str
+    exists: bool
+
+
+MACOS_SAFE_DELETABLES: list[tuple[str, str, str]] = [
+    ("User app caches",            "~/Library/Caches",                                        "rm -rf ~/Library/Caches/*"),
+    ("Xcode derived data",         "~/Library/Developer/Xcode/DerivedData",                   "rm -rf ~/Library/Developer/Xcode/DerivedData"),
+    ("Xcode simulator caches",     "~/Library/Developer/CoreSimulator/Caches",                "rm -rf ~/Library/Developer/CoreSimulator/Caches"),
+    ("Xcode archives",             "~/Library/Developer/Xcode/Archives",                      "rm -rf ~/Library/Developer/Xcode/Archives"),
+    ("iOS device support files",   "~/Library/Developer/Xcode/iOS DeviceSupport",             "rm -rf ~/Library/Developer/Xcode/iOS\\ DeviceSupport"),
+    ("watchOS device support",     "~/Library/Developer/Xcode/watchOS DeviceSupport",         "rm -rf ~/Library/Developer/Xcode/watchOS\\ DeviceSupport"),
+    ("User logs",                  "~/Library/Logs",                                          "rm -rf ~/Library/Logs/*"),
+    ("Crash reports",              "~/Library/Logs/DiagnosticReports",                        "rm -rf ~/Library/Logs/DiagnosticReports/*"),
+    ("Saved application state",    "~/Library/Saved Application State",                       "rm -rf ~/Library/Saved\\ Application\\ State/*"),
+    ("Trash",                      "~/.Trash",                                                 "Empty Trash in Finder"),
+    ("npm cache",                  "~/.npm",                                                   "npm cache clean --force"),
+    ("Homebrew cache",             "~/Library/Caches/Homebrew",                               "brew cleanup"),
+    ("pip cache",                  "~/.cache/pip",                                            "pip cache purge"),
+    ("Yarn cache",                 "~/Library/Caches/Yarn",                                   "yarn cache clean"),
+    ("CocoaPods cache",            "~/Library/Caches/CocoaPods",                              "pod cache clean --all"),
+    ("Gradle caches",              "~/.gradle/caches",                                        "rm -rf ~/.gradle/caches"),
+    ("Maven repository",           "~/.m2/repository",                                        "rm -rf ~/.m2/repository"),
+    ("Docker data",                "~/.docker",                                                "docker system prune -a"),
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,18 +355,20 @@ def _battery_quick_status() -> str:
 
 def _energy_consumers() -> str:
     """Sample top CPU consumers over a brief interval."""
-    for p in psutil.process_iter():
+    primed: list[tuple[psutil.Process, str]] = []
+    for p in psutil.process_iter(["name"]):
         try:
             p.cpu_percent(interval=None)
+            primed.append((p, p.info.get("name") or "?"))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     time.sleep(0.8)
     procs = []
-    for p in psutil.process_iter(["pid", "name", "cpu_percent"]):
+    for p, name in primed:
         try:
-            cpu = p.info["cpu_percent"] or 0.0
+            cpu = p.cpu_percent(interval=None)
             if cpu > 0:
-                procs.append((p.info["name"] or "?", cpu))
+                procs.append((name, cpu))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     procs.sort(key=lambda x: x[1], reverse=True)
@@ -376,6 +405,45 @@ def _linux_power_supply() -> dict[str, str]:
     return {}
 
 
+def _macos_battery_health() -> str:
+    """Parse ioreg output and return only the key battery health fields."""
+    import re
+    raw = _sh(["ioreg", "-rn", "AppleSmartBattery"])
+    if raw.startswith("ERROR"):
+        return raw
+
+    def _val(key: str) -> str:
+        m = re.search(rf'"{key}"\s*=\s*(\S+)', raw)
+        return m.group(1).strip('"') if m else "?"
+
+    cycle_count  = _val("CycleCount")
+    design_cap   = _val("DesignCapacity")
+    max_cap      = _val("AppleRawMaxCapacity")
+    temperature  = _val("Temperature")
+    is_charging  = _val("IsCharging")
+    fully_charged = _val("FullyCharged")
+
+    try:
+        health = f"{int(max_cap) / int(design_cap) * 100:.1f}%"
+    except (ValueError, ZeroDivisionError):
+        health = "?"
+
+    try:
+        temp_c = f"{int(temperature) / 100:.1f}°C"
+    except ValueError:
+        temp_c = temperature
+
+    return "\n".join([
+        f"Cycle count:     {cycle_count} / 1000",
+        f"Design capacity: {design_cap} mAh",
+        f"Max capacity:    {max_cap} mAh",
+        f"Battery health:  {health}",
+        f"Temperature:     {temp_c}",
+        f"Is charging:     {is_charging}",
+        f"Fully charged:   {fully_charged}",
+    ])
+
+
 def collect_battery(os_name: str) -> BatteryData:
     data = BatteryData(os_name=os_name)
 
@@ -384,7 +452,7 @@ def collect_battery(os_name: str) -> BatteryData:
 
         if os_name == "macos":
             fqs   = ex.submit(_battery_quick_status)
-            fhd   = ex.submit(_sh, ["ioreg", "-rn", "AppleSmartBattery"])
+            fhd   = ex.submit(_macos_battery_health)
             fps   = ex.submit(_sh, ["pmset", "-g"])
             fbt   = ex.submit(_sh, ["system_profiler", "SPBluetoothDataType", "-detailLevel", "mini"])
             fwifi = ex.submit(_sh, ["networksetup", "-getairportnetwork", "en0"])
@@ -471,21 +539,19 @@ def _core_count() -> str:
 
 
 def _sample_cpu_procs(top_n: int = 15) -> str:
-    for p in psutil.process_iter():
+    primed: list[tuple[psutil.Process, str, str]] = []
+    for p in psutil.process_iter(["name", "username"]):
         try:
             p.cpu_percent(interval=None)
+            primed.append((p, p.info.get("name") or "?", p.info.get("username") or ""))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     time.sleep(1.0)
     procs = []
-    for p in psutil.process_iter(["pid", "name", "cpu_percent", "username"]):
+    for p, name, user in primed:
         try:
-            procs.append((
-                p.info["pid"],
-                p.info["name"] or "?",
-                p.info["cpu_percent"] or 0.0,
-                p.info["username"] or "",
-            ))
+            cpu = p.cpu_percent(interval=None)
+            procs.append((p.pid, name, cpu, user))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     procs.sort(key=lambda x: x[2], reverse=True)
@@ -615,9 +681,8 @@ def collect_health(os_name: str) -> HealthData:
 
         vm = psutil.virtual_memory()
         sm = psutil.swap_memory()
-        data.total_ram      = _gb(vm.total)
-        data.memory_summary = data.memory_overview
-        data.swap_usage     = f"{_gb(sm.used)} used / {_gb(sm.total)} total ({sm.percent:.1f}%)"
+        data.total_ram  = _gb(vm.total)
+        data.swap_usage = f"{_gb(sm.used)} used / {_gb(sm.total)} total ({sm.percent:.1f}%)"
 
         if os_name == "windows":
             data.gpu_usage      = data.gpu_info
@@ -652,35 +717,149 @@ class NetworkData:
     connections_named: str = "" # Windows
 
 
+def _net_interfaces() -> str:
+    addrs = psutil.net_if_addrs()
+    stats = psutil.net_if_stats()
+    lines = [f"{'Interface':<20}{'Status':<8}{'Address':<22}Speed"]
+    for iface, addr_list in addrs.items():
+        stat = stats.get(iface)
+        up = "UP" if stat and stat.isup else "DOWN"
+        speed = f"{stat.speed}Mbps" if stat and stat.speed else ""
+        for addr in addr_list:
+            if addr.family.name in ("AF_INET", "AF_INET6"):
+                lines.append(f"{iface[:19]:<20}{up:<8}{addr.address[:21]:<22}{speed}")
+    return "\n".join(lines) if len(lines) > 1 else "(no interfaces found)"
+
+
+def _net_connections() -> str:
+    try:
+        conns = psutil.net_connections(kind="inet")
+    except psutil.AccessDenied:
+        return "ERROR: access denied (run as administrator)"
+    lines = [f"{'Proto':<6}{'Local':<26}{'Remote':<26}{'Status':<14}PID"]
+    for c in sorted(conns, key=lambda x: x.status or "")[:25]:
+        laddr = f"{c.laddr.ip}:{c.laddr.port}" if c.laddr else ""
+        raddr = f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else ""
+        proto = "TCP" if c.type.name == "SOCK_STREAM" else "UDP"
+        lines.append(f"{proto:<6}{laddr[:25]:<26}{raddr[:25]:<26}{c.status or '':<14}{c.pid or ''}")
+    return "\n".join(lines)
+
+
+def _net_listening() -> str:
+    try:
+        conns = psutil.net_connections(kind="inet")
+    except psutil.AccessDenied:
+        return "ERROR: access denied"
+    listening = [c for c in conns if c.status == "LISTEN"]
+    pid_names: dict[int, str] = {}
+    for c in listening:
+        if c.pid and c.pid not in pid_names:
+            try:
+                pid_names[c.pid] = psutil.Process(c.pid).name()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pid_names[c.pid] = "?"
+    lines = [f"{'Port':<8}{'Address':<20}{'PID':<7}Process"]
+    for c in sorted(listening, key=lambda x: x.laddr.port if x.laddr else 0)[:25]:
+        port = c.laddr.port if c.laddr else 0
+        addr = c.laddr.ip if c.laddr else ""
+        name = pid_names.get(c.pid, "?") if c.pid else ""
+        lines.append(f"{port:<8}{addr:<20}{c.pid or '':<7}{name}")
+    return "\n".join(lines)
+
+
+def _net_bandwidth() -> str:
+    io = psutil.net_io_counters(pernic=True)
+    lines = [f"{'Interface':<20}{'Sent':<14}{'Received':<14}PktsSent / PktsRecv"]
+    for iface, c in sorted(io.items()):
+        lines.append(
+            f"{iface[:19]:<20}{_mb(c.bytes_sent):<14}{_mb(c.bytes_recv):<14}"
+            f"{c.packets_sent} / {c.packets_recv}"
+        )
+    return "\n".join(lines)
+
+
+def _net_vpn() -> str:
+    vpn_keywords = {"tun", "tap", "vpn", "wg", "utun", "ppp"}
+    vpn_ifaces = [
+        name for name in psutil.net_if_addrs()
+        if any(kw in name.lower() for kw in vpn_keywords)
+    ]
+    if not vpn_ifaces:
+        return "(no VPN interfaces detected)"
+    stats = psutil.net_if_stats()
+    return "\n".join(
+        f"{iface}: {'UP' if stats.get(iface) and stats[iface].isup else 'DOWN'}"
+        for iface in vpn_ifaces
+    )
+
+
 def collect_network(os_name: str) -> NetworkData:
-    reg = CommandRegistry(os_name)
     data = NetworkData(os_name=os_name)
 
-    # Common across all OSes
-    data.interfaces        = _safe_run(reg, "network.interfaces")
-    data.routing_table     = _safe_run(reg, "network.routing_table")
-    data.active_connections = _safe_run(reg, "network.active_connections")
-    data.listening_ports   = _safe_run(reg, "network.listening_ports")
-    data.dns_config        = _safe_run(reg, "network.dns_config")
-    data.vpn_detection     = _safe_run(reg, "network.vpn_detection")
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        f_ifaces  = ex.submit(_net_interfaces)
+        f_conns   = ex.submit(_net_connections)
+        f_listen  = ex.submit(_net_listening)
+        f_bw      = ex.submit(_net_bandwidth)
+        f_vpn     = ex.submit(_net_vpn)
 
-    if os_name == "macos":
-        data.bandwidth      = _safe_run(reg, "network.bandwidth_by_process")
-        data.firewall_status = _safe_run(reg, "network.firewall_status")
-        data.firewall_apps  = _safe_run(reg, "network.firewall_apps")
-        data.wifi_status    = _safe_run(reg, "network.wifi_status")
-        data.proxy_config   = _safe_run(reg, "network.proxy_config")
+        if os_name == "windows":
+            f_route = ex.submit(_ps,
+                "(Get-NetRoute | Select-Object DestinationPrefix,NextHop,InterfaceAlias,RouteMetric "
+                "| Sort-Object RouteMetric | Select-Object -First 20 "
+                "| Format-Table -AutoSize | Out-String).Trim()")
+            f_dns   = ex.submit(_ps,
+                "(Get-DnsClientServerAddress | Select-Object InterfaceAlias,ServerAddresses "
+                "| Format-Table -AutoSize | Out-String).Trim()")
+            f_fw    = ex.submit(_ps,
+                "(Get-NetFirewallProfile | Select-Object Name,Enabled "
+                "| Format-Table -AutoSize | Out-String).Trim()")
+            f_fwr   = ex.submit(_ps,
+                "(Get-NetFirewallRule | Where-Object {$_.Enabled -eq 'True' -and $_.Action -eq 'Allow'} "
+                "| Select-Object DisplayName,Direction,Protocol | Sort-Object Direction "
+                "| Select-Object -First 20 | Format-Table -AutoSize | Out-String).Trim()")
+            f_cn    = ex.submit(_ps,
+                "(Get-NetTCPConnection | Where-Object {$_.State -eq 'Established'} "
+                "| Select-Object -First 20 LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess "
+                "| Format-Table -AutoSize | Out-String).Trim()")
+        elif os_name == "macos":
+            f_route = ex.submit(_sh, ["netstat", "-rn"])
+            f_dns   = ex.submit(_sh, ["scutil", "--dns"])
+            f_fw    = ex.submit(_sh, ["pfctl", "-s", "info"])
+            f_wifi  = ex.submit(_sh, [
+                "/System/Library/PrivateFrameworks/Apple80211.framework"
+                "/Versions/Current/Resources/airport", "-I"
+            ])
+            f_proxy = ex.submit(_sh, ["scutil", "--proxy"])
+        elif os_name == "linux":
+            f_route = ex.submit(_sh, ["ip", "route", "show"])
+            f_dns   = ex.submit(lambda: Path("/etc/resolv.conf").read_text(
+                encoding="utf-8", errors="replace"
+            ) if Path("/etc/resolv.conf").exists() else "(not found)")
+            f_fw    = ex.submit(_sh, ["ufw", "status", "verbose"])
+            f_fwi   = ex.submit(_sh, ["iptables", "-L", "-n", "--line-numbers"])
+        else:
+            f_route = ex.submit(lambda: "(unsupported OS)")
+            f_dns   = ex.submit(lambda: "(unsupported OS)")
+            f_fw    = ex.submit(lambda: "(unsupported OS)")
 
-    elif os_name == "linux":
-        data.bandwidth        = _safe_run(reg, "network.bandwidth_by_process")
-        data.firewall_status  = _safe_run(reg, "network.firewall_status_ufw")
-        data.firewall_iptables = _safe_run(reg, "network.firewall_status_iptables")
+        data.interfaces         = f_ifaces.result()
+        data.active_connections = f_conns.result()
+        data.listening_ports    = f_listen.result()
+        data.bandwidth          = f_bw.result()
+        data.vpn_detection      = f_vpn.result()
+        data.routing_table      = f_route.result()
+        data.dns_config         = f_dns.result()
+        data.firewall_status    = f_fw.result()
 
-    elif os_name == "windows":
-        data.bandwidth         = _safe_run(reg, "network.bandwidth_by_adapter")
-        data.firewall_status   = _safe_run(reg, "network.firewall_status")
-        data.firewall_rules    = _safe_run(reg, "network.firewall_rules_active")
-        data.connections_named = _safe_run(reg, "network.connections_with_process_names")
+        if os_name == "windows":
+            data.firewall_rules    = f_fwr.result()
+            data.connections_named = f_cn.result()
+        elif os_name == "macos":
+            data.wifi_status  = f_wifi.result()
+            data.proxy_config = f_proxy.result()
+        elif os_name == "linux":
+            data.firewall_iptables = f_fwi.result()
 
     return data
 
@@ -704,26 +883,57 @@ class StartupData:
 
 
 def collect_startup(os_name: str) -> StartupData:
-    reg = CommandRegistry(os_name)
     data = StartupData(os_name=os_name)
 
-    if os_name == "macos":
-        data.user_items    = _safe_run(reg, "startup.list_user_agents")
-        data.system_items  = _safe_run(reg, "startup.list_system_agents")
-        data.system_daemons = _safe_run(reg, "startup.list_system_daemons")
-        data.running_items = _safe_run(reg, "startup.list_running_noapple")
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        if os_name == "macos":
+            f_ua = ex.submit(_sh, ["launchctl", "list"])
+            la_path = os.path.expanduser("~/Library/LaunchAgents")
+            f_la = ex.submit(lambda: "\n".join(os.listdir(la_path))
+                             if os.path.exists(la_path) else "(none)")
+            f_ld = ex.submit(lambda: "\n".join(os.listdir("/Library/LaunchDaemons"))
+                             if os.path.exists("/Library/LaunchDaemons") else "(none)")
 
-    elif os_name == "linux":
-        data.user_items           = _safe_run(reg, "startup.list_user_autostart")
-        data.system_items         = _safe_run(reg, "startup.list_enabled_services")
-        data.running_items        = _safe_run(reg, "startup.list_running_services")
-        data.boot_time_summary    = _safe_run(reg, "startup.boot_time_summary")
-        data.boot_time_per_service = _safe_run(reg, "startup.boot_time_per_service")
+            data.running_items  = f_ua.result()
+            data.user_items     = f_la.result()
+            data.system_daemons = f_ld.result()
 
-    elif os_name == "windows":
-        data.user_items       = _safe_run(reg, "startup.list_registry_run_user")
-        data.system_items     = _safe_run(reg, "startup.list_registry_run_system")
-        data.scheduled_tasks  = _safe_run(reg, "startup.list_scheduled_tasks")
-        data.auto_services    = _safe_run(reg, "startup.list_auto_services")
+        elif os_name == "linux":
+            f_sys = ex.submit(_sh, ["systemctl", "list-unit-files",
+                                    "--state=enabled", "--no-pager"])
+            f_run = ex.submit(_sh, ["systemctl", "list-units",
+                                    "--type=service", "--state=running", "--no-pager"])
+            f_bt  = ex.submit(_sh, ["systemd-analyze"])
+            f_btp = ex.submit(_sh, ["systemd-analyze", "blame"])
+            auto_path = os.path.expanduser("~/.config/autostart")
+            f_usr = ex.submit(lambda: "\n".join(os.listdir(auto_path))
+                              if os.path.exists(auto_path) else "(none)")
+
+            data.system_items          = f_sys.result()
+            data.running_items         = f_run.result()
+            data.boot_time_summary     = f_bt.result()
+            data.boot_time_per_service = f_btp.result()
+            data.user_items            = f_usr.result()
+
+        elif os_name == "windows":
+            f_ru = ex.submit(_ps,
+                "(Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' "
+                "| Format-List | Out-String).Trim()")
+            f_rs = ex.submit(_ps,
+                "(Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' "
+                "| Format-List | Out-String).Trim()")
+            f_st = ex.submit(_ps,
+                "(Get-ScheduledTask | Where-Object {$_.State -ne 'Disabled'} "
+                "| Select-Object TaskName,State | Sort-Object TaskName "
+                "| Select-Object -First 30 | Format-Table -AutoSize | Out-String).Trim()")
+            f_sv = ex.submit(_ps,
+                "(Get-Service | Where-Object {$_.StartType -eq 'Automatic' -and $_.Status -eq 'Running'} "
+                "| Select-Object Name,DisplayName | Sort-Object Name "
+                "| Format-Table -AutoSize | Out-String).Trim()")
+
+            data.user_items      = f_ru.result()
+            data.system_items    = f_rs.result()
+            data.scheduled_tasks = f_st.result()
+            data.auto_services   = f_sv.result()
 
     return data
