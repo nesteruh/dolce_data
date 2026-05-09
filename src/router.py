@@ -5,6 +5,8 @@ Classifies the user prompt and dispatches to the correct specialist agent.
 
 from __future__ import annotations
 
+import os
+
 from openai import OpenAI
 
 from src.agents import (
@@ -17,6 +19,7 @@ from src.agents import (
     run_activity_agent,
 )
 from src.collectors import detect_os
+from src.judge import JudgedResult, run_judge
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,14 +94,16 @@ def handle(
     user_prompt: str,
     client: OpenAI,
     model: str = "llama3.2",
+    judge_model: str | None = None,
     verbose: bool = False,
-) -> AgentResult:
+) -> JudgedResult:
     """
     Main pipeline:
       1. Detect OS
       2. Classify prompt → domain
       3. Run specialist agent (collects data + LLM analysis + formatting)
-      4. Return the AgentResult (raw data + LLM analysis)
+      4. Run judge layer (parallel per-suggestion evaluation + holistic check)
+      5. Return JudgedResult wrapping AgentResult + JudgeVerdict
     """
     os_name = detect_os()
     domain = _classify(user_prompt)
@@ -120,4 +125,11 @@ def handle(
         print(f"[{result.agent}] Raw data collected.")
         print(f"[{result.agent}] Suggestions found: {len(result.suggestions)}\n")
 
-    return result
+    _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)
+    judged = run_judge(result, user_prompt, domain, client, _judge_model)
+
+    if verbose:
+        blocked = [v for v in judged.verdict.verdicts if not v.approved]
+        print(f"[Judge] {len(blocked)} suggestion(s) blocked. Model: {_judge_model}\n")
+
+    return judged

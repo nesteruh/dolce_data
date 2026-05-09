@@ -380,14 +380,16 @@ class BatteryData:
     quick_status: str = ""
     health_detail: str = ""
     power_settings: str = ""
-    energy_consumers: str = ""
-    bluetooth: str = ""         # macOS only
-    wifi: str = ""              # macOS only
-    charge_level: str = ""      # Linux only
-    charge_status: str = ""     # Linux only
-    design_capacity: str = ""   # Linux only
-    current_capacity: str = ""  # Linux only
-    power_plan: str = ""        # Windows only
+    energy_consumers: str = ""   # psutil CPU% snapshot (all platforms)
+    bluetooth: str = ""          # macOS only
+    wifi: str = ""               # macOS only
+    energy_impact: str = ""      # macOS only: Activity Monitor-style Energy Impact
+    drain_history: str = ""      # macOS only: pmset log — last ~1 hour of events
+    charge_level: str = ""       # Linux only
+    charge_status: str = ""      # Linux only
+    design_capacity: str = ""    # Linux only
+    current_capacity: str = ""   # Linux only
+    power_plan: str = ""         # Windows only
 
 
 def _battery_quick_status() -> str:
@@ -426,6 +428,55 @@ def _energy_consumers() -> str:
     for name, cpu in procs[:10]:
         lines.append(f"{name[:34]:<35} {cpu:.1f}%")
     return "\n".join(lines)
+
+
+def _macos_energy_impact() -> str:
+    """Per-process Energy Impact from macOS top — mirrors Activity Monitor's Energy column."""
+    raw = _sh(["top", "-l", "2", "-o", "power", "-n", "10"], timeout=15)
+    if raw.startswith("ERROR"):
+        return raw
+
+    # top -l 2 outputs two full samples; split on the repeated "Processes:" header
+    parts = raw.split("Processes:")
+    block = ("Processes:" + parts[-1]) if len(parts) > 1 else raw
+
+    lines: list[str] = []
+    in_table = False
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not in_table and "PID" in stripped and "COMMAND" in stripped:
+            in_table = True
+            lines.append(f"{'Process':<35} {'CPU%':<8} Energy Impact")
+            continue
+        if in_table and stripped:
+            lines.append(stripped)
+
+    return "\n".join(lines) if lines else "(no energy impact data)"
+
+
+def _macos_battery_drain_history() -> str:
+    """Last ~1 hour of battery drain events from pmset log (no sudo needed)."""
+    from datetime import datetime as _dt, timedelta, timezone
+    raw = _sh(["pmset", "-g", "log"], timeout=10)
+    if raw.startswith("ERROR"):
+        return raw
+
+    cutoff = _dt.now(timezone.utc) - timedelta(hours=1)
+    events: list[str] = []
+    for line in raw.splitlines():
+        try:
+            ts_str = " ".join(line.split()[:3])
+            ts = _dt.strptime(ts_str, "%Y-%m-%d %H:%M:%S %z")
+        except (ValueError, IndexError):
+            continue
+        if ts < cutoff:
+            continue
+        if "%" in line:
+            events.append(line.strip())
+
+    if not events:
+        return "(no drain events in the last hour)"
+    return "\n".join(events[-20:])
 
 
 def _linux_power_supply() -> dict[str, str]:
@@ -506,12 +557,16 @@ def collect_battery(os_name: str) -> BatteryData:
             fps   = ex.submit(_sh, ["pmset", "-g"])
             fbt   = ex.submit(_sh, ["system_profiler", "SPBluetoothDataType", "-detailLevel", "mini"])
             fwifi = ex.submit(_sh, ["networksetup", "-getairportnetwork", "en0"])
+            fei   = ex.submit(_macos_energy_impact)
+            fdh   = ex.submit(_macos_battery_drain_history)
 
             data.quick_status   = fqs.result()
             data.health_detail  = fhd.result()
             data.power_settings = fps.result()
             data.bluetooth      = fbt.result()
             data.wifi           = fwifi.result()
+            data.energy_impact  = fei.result()
+            data.drain_history  = fdh.result()
 
         elif os_name == "linux":
             fps_f = ex.submit(_linux_power_supply)

@@ -221,8 +221,21 @@ def run_storage_agent(
 _BATTERY_SYSTEM = _SYSTEM_BASE + textwrap.dedent("""\
 
     You are the BATTERY AGENT. You specialise in battery health, charge cycles,
-    energy-hungry processes, and power management settings. Help the user
-    understand why their battery drains and what they can do about it.
+    energy-hungry processes, and power management settings.
+
+    CRITICAL RESPONSE RULES:
+    1. ALWAYS check TOP CPU / ENERGY CONSUMERS and ENERGY IMPACT sections first.
+       If any process shows CPU% above 5% or a notable Energy Impact value, name it
+       explicitly as a primary drain cause — never ignore this data.
+    2. Structure diagnostic answers in this order:
+       a. One sentence: current charge %, charging status, and time remaining.
+       b. "The main battery drain is caused by:" — list the specific app names from
+          the data with their CPU% or Energy Impact values.
+       c. SUGGESTION lines using SUGGESTION [RISK:<level>]: format.
+       d. One closing sentence.
+    3. If BATTERY DRAIN HISTORY is present, add one sentence on whether the drain
+       rate appears to be accelerating, steady, or slowing.
+    4. Never fabricate app names, process names, or values. Use only what is in the data.
 """)
 
 
@@ -244,6 +257,12 @@ def run_battery_agent(
 
         === TOP CPU / ENERGY CONSUMERS ===
         {data.energy_consumers or '(no data)'}
+
+        === ENERGY IMPACT (Activity Monitor equivalent) ===
+        {data.energy_impact or '(not available on this OS)'}
+
+        === BATTERY DRAIN HISTORY (last ~1 hour) ===
+        {data.drain_history or '(not available on this OS)'}
 
         === POWER SETTINGS ===
         {data.power_settings or '(no data)'}
