@@ -65,6 +65,21 @@ def _ask(prompt: str) -> str:
     return input(f"{prompt}: ")
 
 
+def _show_raw_data(raw: str, agent: str) -> None:
+    if _RICH:
+        console.print(Panel(
+            raw,
+            title=f"[bold yellow]Raw Terminal Data — {agent}[/bold yellow]",
+            border_style="yellow",
+            padding=(1, 2),
+        ))
+    else:
+        print("\n" + "-"*60)
+        print(f"RAW DATA ({agent}):")
+        print(raw)
+        print("-"*60 + "\n")
+
+
 def _show_answer(answer: str) -> None:
     if _RICH:
         console.print(Panel(Markdown(answer), title="[bold green]Assistant[/bold green]",
@@ -122,8 +137,9 @@ def main() -> None:
             break
 
         try:
-            answer = _spinner_call(handle, user_input, client, MODEL, verbose=False)
-            _show_answer(answer)
+            result = _spinner_call(handle, user_input, client, MODEL, verbose=False)
+            _show_raw_data(result.raw_data_summary, result.agent)
+            _show_answer(result.full_response)
         except Exception as exc:
             _print(f"\n⚠️  Error: {exc}", "bold red")
             _print("Make sure Ollama is running and the model is available.", "dim")
