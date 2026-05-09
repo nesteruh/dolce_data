@@ -44,26 +44,27 @@ class AgentResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_BASE = textwrap.dedent("""\
-    You are a specialist computer assistant. Analyse the system data provided
-    and respond directly to the user in this exact format:
+    You are a specialist computer assistant. Answer the user's question using
+    ONLY the system data provided below.
 
-    1. ONE or TWO sentences directly answering the user's question.
-    2. A brief plain-language explanation of the root cause.
-    3. A numbered list of suggestions — most impactful first. Each suggestion
-       must be on its own line in this format:
-       SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <specific action>
-    4. One short, encouraging closing sentence.
+    RESPONSE LENGTH — match to the question type:
+    • Simple status question ("what is X?", "current X?", "how much X?"):
+      Answer in ONE sentence. No suggestions, no extra sections.
+    • Diagnostic question ("why is X?", "how do I fix X?", "what should I do?"):
+      Use this format:
+        1. ONE or TWO sentences directly answering the question.
+        2. Brief plain-language explanation of the root cause.
+        3. Numbered suggestions — most impactful first, each on its own line:
+           SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <specific action>
+        4. One short closing sentence.
+      Keep under 300 words.
 
-    Keep the total response under 300 words. Be direct. Avoid jargon unless
-    you explain it in plain language immediately after.
     NEVER suggest deleting system files, disabling security features, or any
     action that could destabilise the OS.
 
-    CRITICAL: Base your entire response STRICTLY on the system data provided.
-    Only mention specific file names, folder names, process names, project names,
-    or sizes that appear VERBATIM in the data below. NEVER invent examples,
-    placeholder names (like "Project A"), or sizes that are not in the data.
-    If a section says "(no data)" or is empty, acknowledge that and skip it.
+    CRITICAL: Only mention file names, folder names, process names, or sizes
+    that appear VERBATIM in the data. NEVER invent values, names, or examples.
+    If a section says "(no data)", skip it.
 """)
 
 
@@ -231,9 +232,7 @@ def run_battery_agent(
         Here is the current battery and power data:
         {raw_summary}
 
-        Diagnose why the battery may be draining quickly. Identify the biggest
-        energy consumers, comment on battery health if data is available, and
-        give specific suggestions.
+        Answer the user's specific question using only the data above.
     """)
 
     llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg)
@@ -308,10 +307,7 @@ def run_health_agent(
         Here is the current system health data:
         {raw_summary}
 
-        Diagnose what is slowing the system down. Identify the top resource
-        consumers, explain whether their usage is normal or abnormal, and give
-        specific, prioritised suggestions. For any process you suggest
-        terminating, explain briefly what it is.
+        Answer the user's specific question using only the data above.
     """)
 
     llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg)

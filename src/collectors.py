@@ -407,6 +407,45 @@ def _linux_power_supply() -> dict[str, str]:
     return {}
 
 
+def _macos_battery_health() -> str:
+    """Parse ioreg output and return only the key battery health fields."""
+    import re
+    raw = _sh(["ioreg", "-rn", "AppleSmartBattery"])
+    if raw.startswith("ERROR"):
+        return raw
+
+    def _val(key: str) -> str:
+        m = re.search(rf'"{key}"\s*=\s*(\S+)', raw)
+        return m.group(1).strip('"') if m else "?"
+
+    cycle_count  = _val("CycleCount")
+    design_cap   = _val("DesignCapacity")
+    max_cap      = _val("AppleRawMaxCapacity")
+    temperature  = _val("Temperature")
+    is_charging  = _val("IsCharging")
+    fully_charged = _val("FullyCharged")
+
+    try:
+        health = f"{int(max_cap) / int(design_cap) * 100:.1f}%"
+    except (ValueError, ZeroDivisionError):
+        health = "?"
+
+    try:
+        temp_c = f"{int(temperature) / 100:.1f}°C"
+    except ValueError:
+        temp_c = temperature
+
+    return "\n".join([
+        f"Cycle count:     {cycle_count} / 1000",
+        f"Design capacity: {design_cap} mAh",
+        f"Max capacity:    {max_cap} mAh",
+        f"Battery health:  {health}",
+        f"Temperature:     {temp_c}",
+        f"Is charging:     {is_charging}",
+        f"Fully charged:   {fully_charged}",
+    ])
+
+
 def collect_battery(os_name: str) -> BatteryData:
     data = BatteryData(os_name=os_name)
 
@@ -415,7 +454,7 @@ def collect_battery(os_name: str) -> BatteryData:
 
         if os_name == "macos":
             fqs   = ex.submit(_battery_quick_status)
-            fhd   = ex.submit(_sh, ["ioreg", "-rn", "AppleSmartBattery"])
+            fhd   = ex.submit(_macos_battery_health)
             fps   = ex.submit(_sh, ["pmset", "-g"])
             fbt   = ex.submit(_sh, ["system_profiler", "SPBluetoothDataType", "-detailLevel", "mini"])
             fwifi = ex.submit(_sh, ["networksetup", "-getairportnetwork", "en0"])
