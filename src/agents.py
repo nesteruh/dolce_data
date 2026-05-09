@@ -144,27 +144,30 @@ def _parse_agent_json(data: dict) -> tuple[list[str], list[str]]:
     return suggestions, risks
 
 
-def _format_full_response(data: dict) -> str:
+def _format_full_response(data: dict, fallback: str = "") -> str:
     """Reconstruct a human-readable markdown response from the JSON result."""
     parts: list[str] = []
     analysis = str(data.get("analysis", "")).strip()
     if analysis:
         parts.append(analysis)
-    suggestions = data.get("suggestions", [])
-    if suggestions:
+    suggestion_lines: list[str] = []
+    count = 0
+    for item in data.get("suggestions", []):
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        count += 1
+        risk = str(item.get("risk", "LOW")).upper()
+        rationale = str(item.get("rationale", "")).strip()
+        line = f"{count}. **[{risk}]** {text}"
+        if rationale:
+            line += f"  \n   *{rationale}*"
+        suggestion_lines.append(line)
+    if suggestion_lines:
         parts.append("\n**Suggestions:**")
-        count = 0
-        for item in suggestions:
-            text = str(item.get("text", "")).strip()
-            if not text:
-                continue
-            count += 1
-            risk = str(item.get("risk", "LOW")).upper()
-            rationale = str(item.get("rationale", "")).strip()
-            line = f"{count}. **[{risk}]** {text}"
-            if rationale:
-                line += f"  \n   *{rationale}*"
-            parts.append(line)
+        parts.extend(suggestion_lines)
+    if not parts and fallback:
+        parts.append(fallback)
     return "\n".join(parts)
 
 
@@ -533,7 +536,10 @@ def run_network_agent(
         analysis=data.get("analysis", ""),
         suggestions=suggestions,
         risk_levels=risks,
-        full_response=_format_full_response(data),
+        full_response=_format_full_response(
+            data,
+            fallback="No actionable network issues detected from the available data.",
+        ),
     )
 
 
