@@ -7,7 +7,14 @@ from __future__ import annotations
 
 from openai import OpenAI
 
-from src.agents import AgentResult, run_storage_agent, run_battery_agent, run_health_agent
+from src.agents import (
+    AgentResult,
+    run_storage_agent,
+    run_battery_agent,
+    run_health_agent,
+    run_network_agent,
+    run_startup_agent,
+)
 from src.collectors import detect_os
 
 
@@ -31,6 +38,18 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "hang", "performance", "resource", "process", "activity", "swap",
         "fan", "hot", "thermal", "speed", "fast", "responsive",
     ],
+    "network": [
+        "network", "internet", "connection", "bandwidth", "wifi", "wi-fi",
+        "ethernet", "firewall", "vpn", "dns", "port", "latency", "online",
+        "downloading", "uploading", "ip address", "proxy", "slow internet",
+        "no internet", "connected", "packet", "ping",
+    ],
+    "startup": [
+        "startup", "boot", "login", "login item", "autostart", "launch agent",
+        "launch daemon", "background service", "service", "slow boot",
+        "starts automatically", "runs on startup", "disable on startup",
+        "startup program", "slow login",
+    ],
 }
 
 
@@ -46,7 +65,10 @@ def _classify(prompt: str) -> str:
             if kw in lower:
                 scores[domain] += 1
     best = max(scores, key=lambda d: scores[d])
-    return best if scores[best] > 0 else "health"
+    # If all scores are 0, fall back to health (most general)
+    if scores[best] == 0:
+        return "health"
+    return best
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,6 +98,8 @@ def handle(
         "storage": run_storage_agent,
         "battery": run_battery_agent,
         "health":  run_health_agent,
+        "network": run_network_agent,
+        "startup": run_startup_agent,
     }
     result: AgentResult = dispatch[domain](user_prompt, client, model, os_name)
 

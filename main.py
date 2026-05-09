@@ -34,7 +34,7 @@ MODEL           = os.getenv("AGENT_MODEL",      "llama3.2")
 BANNER = """
 ╔══════════════════════════════════════════════════════╗
 ║         💻  Computer Assistant Agent System          ║
-║   Storage · Battery · CPU/GPU/RAM Health Advisor     ║
+║  Storage · Battery · Health · Network · Startup      ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -45,6 +45,8 @@ EXAMPLES = [
     "Which apps are using the most memory?",
     "I need at least 50 GB free space — help me find it.",
     "My fan is very loud. What is happening?",
+    "Why is my internet connection so slow?",
+    "What programs start automatically when I log in?",
 ]
 
 QUIT_COMMANDS = {"quit", "exit", "q", "bye"}

@@ -582,6 +582,252 @@ Each entry follows this structure:
 
 ---
 
+## 🌐 NETWORK COMMANDS
+
+### CMD_ID: `network.interfaces`
+- **Purpose**: List all network interfaces with IP addresses
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ifconfig | grep -E "^[a-z]|inet "
+  ```
+
+---
+
+### CMD_ID: `network.routing_table`
+- **Purpose**: Show default gateway and full routing table
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  netstat -rn
+  ```
+
+---
+
+### CMD_ID: `network.wifi_status`
+- **Purpose**: Show connected WiFi network name and signal info
+- **Risk**: NONE
+- **Requires**: WiFi interface (usually en0)
+- **Command**:
+  ```
+  networksetup -getairportnetwork en0
+  ```
+
+---
+
+### CMD_ID: `network.active_connections`
+- **Purpose**: All listening ports and established connections with process names
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  lsof -i -n -P | grep -E "LISTEN|ESTABLISHED"
+  ```
+
+---
+
+### CMD_ID: `network.listening_ports`
+- **Purpose**: Only the ports actively accepting new connections
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  lsof -i -n -P | grep LISTEN
+  ```
+
+---
+
+### CMD_ID: `network.bandwidth_by_process`
+- **Purpose**: Per-process network send/receive snapshot
+- **Risk**: NONE
+- **Requires**: nothing (nettop is built-in)
+- **Command**:
+  ```
+  nettop -l 1 -n 20
+  ```
+
+---
+
+### CMD_ID: `network.dns_config`
+- **Purpose**: Show configured DNS servers and search domains
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  scutil --dns
+  ```
+
+---
+
+### CMD_ID: `network.firewall_status`
+- **Purpose**: Check if the application firewall is enabled
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+  ```
+
+---
+
+### CMD_ID: `network.firewall_apps`
+- **Purpose**: List apps with explicit firewall allow/block rules
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  /usr/libexec/ApplicationFirewall/socketfilterfw --listapps
+  ```
+
+---
+
+### CMD_ID: `network.vpn_detection`
+- **Purpose**: Detect active VPN tunnel interfaces (utun*)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ifconfig | grep -A4 utun
+  ```
+
+---
+
+### CMD_ID: `network.proxy_config`
+- **Purpose**: Show any configured system proxy settings
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  scutil --proxy
+  ```
+
+---
+
+### CMD_ID: `network.flush_dns`
+- **Purpose**: Clear the local DNS cache to resolve stale record issues
+- **Risk**: LOW
+- **Requires**: explicit user confirmation
+- **Command**:
+  ```
+  sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+  ```
+
+---
+
+## 🚀 STARTUP / LOGIN ITEMS COMMANDS
+
+### CMD_ID: `startup.list_user_agents`
+- **Purpose**: List user-level LaunchAgents (third-party, per-user scope)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ls -la ~/Library/LaunchAgents/
+  ```
+
+---
+
+### CMD_ID: `startup.list_system_agents`
+- **Purpose**: List system-wide LaunchAgents (third-party, all users)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ls -la /Library/LaunchAgents/
+  ```
+
+---
+
+### CMD_ID: `startup.list_system_daemons`
+- **Purpose**: List system-wide LaunchDaemons (third-party, system scope)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ls -la /Library/LaunchDaemons/
+  ```
+
+---
+
+### CMD_ID: `startup.list_running`
+- **Purpose**: All currently loaded launch agents/daemons with their PID and status
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  launchctl list | grep -v "^-"
+  ```
+
+---
+
+### CMD_ID: `startup.list_running_noapple`
+- **Purpose**: Running launch items filtered to non-Apple entries only
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  launchctl list | grep -v com.apple | grep -v "^-"
+  ```
+
+---
+
+### CMD_ID: `startup.read_plist_binary`
+- **Purpose**: Find the binary path a LaunchAgent plist will execute
+- **Risk**: NONE
+- **Requires**: plist path parameter `<plist_path>`
+- **Command**:
+  ```
+  /usr/libexec/PlistBuddy -c "Print :ProgramArguments" <plist_path> 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `startup.disable_user_agent`
+- **Purpose**: Prevent a user LaunchAgent from loading at next login
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + plist filename `<name>.plist`
+- **Command**:
+  ```
+  launchctl unload ~/Library/LaunchAgents/<name>.plist
+  ```
+
+---
+
+### CMD_ID: `startup.enable_user_agent`
+- **Purpose**: Re-enable a previously disabled user LaunchAgent
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + plist filename `<name>.plist`
+- **Command**:
+  ```
+  launchctl load ~/Library/LaunchAgents/<name>.plist
+  ```
+
+---
+
+### CMD_ID: `startup.stop_running_agent`
+- **Purpose**: Stop the currently running instance without disabling at login
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + label parameter `<label>`
+- **Command**:
+  ```
+  launchctl stop <label>
+  ```
+
+---
+
+### CMD_ID: `startup.remove_orphaned_plist`
+- **Purpose**: Delete a LaunchAgent plist whose binary no longer exists
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + show plist content to user first
+- **Command**:
+  ```
+  rm ~/Library/LaunchAgents/<name>.plist
+  ```
+
+---
+
 ## 🚫 FORBIDDEN COMMANDS (macOS)
 > These command IDs exist only to document what must NEVER be executed.
 > Agents must refuse any user request that maps to these.
