@@ -35,6 +35,7 @@ BANNER = """
 ╔══════════════════════════════════════════════════════╗
 ║         💻  Computer Assistant Agent System          ║
 ║  Storage · Battery · Health · Network · Startup      ║
+║  Activity                                            ║
 ╚══════════════════════════════════════════════════════╝
 """
 
@@ -47,6 +48,8 @@ EXAMPLES = [
     "My fan is very loud. What is happening?",
     "Why is my internet connection so slow?",
     "What programs start automatically when I log in?",
+    "What have I been working on recently?",
+    "Which files did I open last week?",
 ]
 
 QUIT_COMMANDS = {"quit", "exit", "q", "bye"}

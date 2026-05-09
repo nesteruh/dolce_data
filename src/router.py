@@ -14,6 +14,7 @@ from src.agents import (
     run_health_agent,
     run_network_agent,
     run_startup_agent,
+    run_activity_agent,
 )
 from src.collectors import detect_os
 
@@ -26,7 +27,7 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "storage": [
         "disk", "storage", "space", "free space", "gb", "tb", "cache",
         "temp", "large file", "download", "trash", "full", "clean", "wipe",
-        "no space", "running out", "file size",
+        "no space", "running out", "file size", "stale", "old file",
     ],
     "battery": [
         "battery", "charge", "drain", "power", "charging", "unplugged",
@@ -35,14 +36,15 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     ],
     "health": [
         "cpu", "gpu", "ram", "memory", "processor", "slow", "lag", "freeze",
-        "hang", "performance", "resource", "process", "activity", "swap",
+        "hang", "performance", "resource", "process", "swap",
         "fan", "hot", "thermal", "speed", "fast", "responsive",
     ],
     "network": [
         "network", "internet", "connection", "bandwidth", "wifi", "wi-fi",
         "ethernet", "firewall", "vpn", "dns", "port", "latency", "online",
         "downloading", "uploading", "ip address", "proxy", "slow internet",
-        "no internet", "connected", "packet", "ping",
+        "no internet", "connected", "packet", "ping", "slow connection",
+        "network slow", "internet slow",
     ],
     "startup": [
         "startup", "boot", "login", "login item", "autostart", "launch agent",
@@ -50,13 +52,21 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "starts automatically", "runs on startup", "disable on startup",
         "startup program", "slow login",
     ],
+    "activity": [
+        "recently opened", "recent files", "last opened", "what did i",
+        "what have i", "i've been", "my history", "file history",
+        "opened recently", "used recently", "command history", "shell history",
+        "apps i use", "frequently used", "usage history", "recent activity",
+        "what was i working on", "last week", "last month", "recently",
+        "what i opened", "have i used", "did i open", "what i've been",
+    ],
 }
 
 
 def _classify(prompt: str) -> str:
     """
-    Return 'storage', 'battery', or 'health' based on keyword overlap.
-    Defaults to 'health' if ambiguous.
+    Return the domain whose keywords best match the prompt.
+    Ties are broken by domain priority (health is the last resort fallback).
     """
     lower = prompt.lower()
     scores = {domain: 0 for domain in _DOMAIN_KEYWORDS}
@@ -64,11 +74,13 @@ def _classify(prompt: str) -> str:
         for kw in keywords:
             if kw in lower:
                 scores[domain] += 1
-    best = max(scores, key=lambda d: scores[d])
-    # If all scores are 0, fall back to health (most general)
-    if scores[best] == 0:
+
+    if all(s == 0 for s in scores.values()):
         return "health"
-    return best
+
+    # Tiebreak: health loses to any equally-scoring specific domain
+    _priority = ["activity", "startup", "network", "storage", "battery", "health"]
+    return max(scores, key=lambda d: (scores[d], -_priority.index(d)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,11 +107,12 @@ def handle(
         print(f"\n[Router] OS={os_name} | Domain={domain}\n")
 
     dispatch = {
-        "storage": run_storage_agent,
-        "battery": run_battery_agent,
-        "health":  run_health_agent,
-        "network": run_network_agent,
-        "startup": run_startup_agent,
+        "storage":  run_storage_agent,
+        "battery":  run_battery_agent,
+        "health":   run_health_agent,
+        "network":  run_network_agent,
+        "startup":  run_startup_agent,
+        "activity": run_activity_agent,
     }
     result: AgentResult = dispatch[domain](user_prompt, client, model, os_name)
 
