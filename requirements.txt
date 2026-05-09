@@ -4,6 +4,7 @@ psutil
 rich
 chromadb
 ollama
-markitdown
+markitdown[all]
 PyMuPDF
 python-docx
+watchdog
