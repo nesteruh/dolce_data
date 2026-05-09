@@ -60,6 +60,26 @@ Use the following keyword/concept mapping to classify incoming prompts:
 - "My fan is running loud"
 - "Which apps are using the most CPU?"
 
+### 🌐 → NetworkAgent
+**Triggers**: network, internet, connection, bandwidth, WiFi, ethernet, firewall, VPN, DNS, port, latency, slow internet, downloading, uploading, connected, IP address, proxy, open ports
+
+**Example prompts**:
+- "Why is my internet so slow?"
+- "What apps are using my network?"
+- "Is my firewall enabled?"
+- "What ports are open on my machine?"
+- "Is something connecting to the internet without my knowledge?"
+
+### 🚀 → StartupAgent
+**Triggers**: startup, boot, login, login items, autostart, launch agent, launch daemon, background service, service, slow boot, starts automatically, runs on startup, disable on startup, startup programs
+
+**Example prompts**:
+- "Why does my Mac take so long to boot?"
+- "What programs start automatically when I log in?"
+- "How do I stop [app] from launching at startup?"
+- "Show me all background services"
+- "I want to disable some startup items to speed up login"
+
 ---
 
 ## 3. Routing Decision Algorithm
@@ -68,13 +88,16 @@ Use the following keyword/concept mapping to classify incoming prompts:
 INPUT: user_prompt
 
 1. Tokenize and normalize prompt (lowercase, strip punctuation)
-2. Score against each domain's keyword set (simple keyword overlap OR LLM classification)
+2. Score against each domain's keyword set (keyword overlap count)
 3. Select highest-scoring domain
-4. If score is ambiguous (two domains tied):
+4. If two domains score equally:
    a. Ask: "Did you mean [Domain A] or [Domain B]?"
-5. If no domain matches:
-   a. Respond: "I can help with storage, battery, or system performance. Which area are you asking about?"
-6. Dispatch to selected agent with: {original_prompt, detected_os, session_context}
+5. If three or more domains score equally (multi-domain request):
+   a. Dispatch to each matched agent sequentially
+   b. Combine responses under separate sections
+6. If no domain matches:
+   a. Respond: "I can help with storage, battery, system performance, network, or startup items. Which area are you asking about?"
+7. Dispatch to selected agent(s) with: {original_prompt, detected_os, session_context}
 ```
 
 ---
@@ -86,13 +109,18 @@ When routing to a specialist agent, always include:
 ```json
 {
   "original_prompt": "<user's exact message>",
-  "classified_domain": "storage | battery | health",
+  "classified_domain": "storage | battery | health | network | startup",
   "detected_os": "macos | linux | windows",
   "session_id": "<unique session identifier>",
   "timestamp": "<ISO 8601>",
   "urgency": "info | action_required | critical"
 }
 ```
+
+**Urgency determination:**
+- `critical`: battery <10%, firewall disabled, disk >98% full, CPU >90% for 5+ min
+- `action_required`: a flagged issue needs user decision to resolve
+- `info`: routine status query with no immediate action needed
 
 ---
 
@@ -103,7 +131,7 @@ After receiving the specialist's response, present it to the user as-is without 
 If an error occurs during routing:
 ```
 ⚠️ RouterAgent could not dispatch your request: [reason]
-Please rephrase your question or specify: storage / battery / performance.
+Please rephrase your question or specify: storage / battery / performance / network / startup.
 ```
 
 ---
