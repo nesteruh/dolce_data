@@ -29,8 +29,8 @@ except ImportError:
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_API_KEY  = os.getenv("OLLAMA_API_KEY",  "ollama")
-MODEL           = os.getenv("AGENT_MODEL",      "llama3.2")
-JUDGE_MODEL     = os.getenv("JUDGE_MODEL",      "llama3.1:8b")
+MODEL           = os.getenv("AGENT_MODEL",  "llama3.2")
+JUDGE_MODEL     = os.getenv("JUDGE_MODEL",  MODEL)
 
 BANNER = """
 ╔══════════════════════════════════════════════════════╗
@@ -100,6 +100,15 @@ def _show_judge_verdict(judged) -> None:
 
     if _RICH:
         lines: list[str] = []
+
+        # ── Judge failure warning ─────────────────────────────────────────────
+        if verdict.judge_failed:
+            reason = f": {verdict.failure_reason}" if verdict.failure_reason else ""
+            lines.append(
+                f"[bold red]⚠  Judge evaluation failed{reason}.[/bold red]"
+                "  [red]Suggestions have NOT been safety-verified.[/red]"
+            )
+            lines.append("")
 
         # ── Suggestions section ───────────────────────────────────────────────
         n = len(verdict.verdicts)
@@ -182,6 +191,12 @@ def _show_judge_verdict(judged) -> None:
         print(f"\n{sep}")
         print(f"LLM-AS-A-JUDGE  ({verdict.judge_model})")
         print(sep)
+
+        if verdict.judge_failed:
+            reason = f": {verdict.failure_reason}" if verdict.failure_reason else ""
+            print(f"  ⚠  Judge evaluation failed{reason}.")
+            print("     Suggestions have NOT been safety-verified.")
+            print()
 
         n = len(verdict.verdicts)
         if n == 0:
