@@ -65,6 +65,8 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "apps i use", "frequently used", "usage history", "recent activity",
         "what was i working on", "last week", "last month", "recently",
         "what i opened", "have i used", "did i open", "what i've been",
+        "activity", "frequent", "my usage", "what i've done", "what i did",
+        "app usage", "usage", "how i use", "what apps", "which apps",
     ],
 }
 
@@ -160,6 +162,7 @@ _DISPATCH: dict[str, object] = {
     "health":  run_health_agent,
     "network": run_network_agent,
     "startup": run_startup_agent,
+    "activity":run_activity_agent,
 }
 
 
@@ -191,7 +194,8 @@ def handle(
         result: AgentResult = runner(user_prompt, client, model, os_name)
         if verbose:
             print(f"[{result.agent}] Suggestions: {len(result.suggestions)}\n")
-        return result
+        _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)
+        return run_judge(result, user_prompt, domains[0], client, _judge_model)
 
     # ── Multi-domain: run agents in parallel ────────────────────────────────
     if verbose:
@@ -218,8 +222,8 @@ def handle(
                     print(f"[Router] {domain} agent failed: {exc}")
 
     if not results:
-        # Return a minimal AgentResult so main.py's attribute access never fails
-        return AgentResult(
+        from src.judge import JudgeVerdict
+        _empty = AgentResult(
             agent="Router",
             raw_data_summary="",
             analysis="All agents failed to collect data.",
@@ -227,6 +231,12 @@ def handle(
             risk_levels=[],
             full_response="⚠️ All agents failed to collect data. Please check that system commands are available.",
         )
+        _empty_verdict = JudgeVerdict(
+            verdicts=[], router_domain_correct=False, router_note="All agents failed",
+            response_relevant=False, relevance_note="", overall_quality="POOR",
+            quality_note="", judge_model="",
+        )
+        return JudgedResult(agent_result=_empty, verdict=_empty_verdict, domain=", ".join(domains))
 
     # Restore original domain order (classifier returns them sorted by score)
     domain_order = {d: i for i, d in enumerate(domains)}
@@ -248,7 +258,7 @@ def handle(
         )
 
     _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)
-    judged = run_judge(result, user_prompt, domain, client, _judge_model)
+    judged = run_judge(merged, user_prompt, ", ".join(domains), client, _judge_model)
 
     if verbose:
         blocked = [v for v in judged.verdict.verdicts if not v.approved]
