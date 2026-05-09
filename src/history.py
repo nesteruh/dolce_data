@@ -61,12 +61,16 @@ def _write_entry(user_prompt: str, judged: JudgedResult, path: str) -> None:
         },
         "judge": {
             "model": verdict.judge_model,
-            "overall_quality": verdict.overall_quality,
-            "quality_note": verdict.quality_note,
+            "score": verdict.score,
+            "score_reason": verdict.score_reason,
+            "score_grounding": verdict.score_grounding,
+            "score_specificity": verdict.score_specificity,
+            "score_relevance": verdict.score_relevance,
+            "answer_blocked": verdict.answer_blocked,
             "router_domain_correct": verdict.router_domain_correct,
             "router_note": verdict.router_note,
-            "response_relevant": verdict.response_relevant,
-            "relevance_note": verdict.relevance_note,
+            "judge_failed": verdict.judge_failed,
+            "failure_reason": verdict.failure_reason,
             "blocked_count": sum(1 for v in verdict.verdicts if not v.approved),
             "suggestions": [
                 {

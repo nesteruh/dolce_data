@@ -44,6 +44,9 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "cpu", "gpu", "ram", "memory", "processor", "slow", "lag", "freeze",
         "hang", "performance", "resource", "process", "swap",
         "fan", "hot", "thermal", "speed", "fast", "responsive",
+        "health", "report", "overview", "status", "summary", "diagnostic",
+        "check", "analyse", "analyze", "performance report", "system report",
+        "suggestions", "suggestion", "improve", "optimise", "optimize",
     ],
     "network": [
         "network", "internet", "connection", "bandwidth", "wifi", "wi-fi",
@@ -86,13 +89,8 @@ _AGENT_EMOJI: dict[str, str] = {
 
 def _classify(prompt: str) -> list[str]:
     """
-    Return an ordered list of matched domains.
-
-    Every domain that scores at least 1 keyword hit is included.
-    Using a flat threshold of 1 means explicit mentions (e.g. "cpu", "ram",
-    "network" all in one sentence) always trigger their respective agents,
-    even when one domain accumulates more keyword hits than another.
-    Falls back to ["health"] when nothing matches at all.
+    Return the best-matching domain (storage/battery/health/network/startup).
+    Defaults to 'health' if no keywords match.
     """
     lower = prompt.lower()
     scores: dict[str, int] = {domain: 0 for domain in _DOMAIN_KEYWORDS}
@@ -172,6 +170,7 @@ def handle(
     model: str = "llama3.2",
     judge_model: str | None = None,
     verbose: bool = False,
+    history: list[dict] | None = None,
 ) -> JudgedResult:
     """
     Main pipeline:
@@ -188,14 +187,15 @@ def handle(
         tag = "Domain" if len(domains) == 1 else "Domains"
         print(f"\n[Router] OS={os_name} | {tag}={domains}\n")
 
-    # ── Single domain: simple path, no threading overhead ──────────────────
-    if len(domains) == 1:
-        runner = _DISPATCH[domains[0]]
-        result: AgentResult = runner(user_prompt, client, model, os_name)
-        if verbose:
-            print(f"[{result.agent}] Suggestions: {len(result.suggestions)}\n")
-        _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)
-        return run_judge(result, user_prompt, domains[0], client, _judge_model)
+    dispatch = {
+        "storage": run_storage_agent,
+        "battery": run_battery_agent,
+        "health":  run_health_agent,
+        "network": run_network_agent,
+        "startup": run_startup_agent,
+        "activity": run_activity_agent
+    }
+    result: AgentResult = dispatch[domain](user_prompt, client, model, os_name, history)
 
     # ── Multi-domain: run agents in parallel ────────────────────────────────
     if verbose:
@@ -258,7 +258,7 @@ def handle(
         )
 
     _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)
-    judged = run_judge(merged, user_prompt, ", ".join(domains), client, _judge_model)
+    judged = run_judge(merged, user_prompt, ", ".join(domains), client, _judge_model, history = history)
 
     if verbose:
         blocked = [v for v in judged.verdict.verdicts if not v.approved]

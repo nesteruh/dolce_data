@@ -1,10 +1,14 @@
 """
-LLM-as-a-Judge safety and quality layer.
+LLM-as-a-Judge safety and quality layer — two independent tiers.
 
-Each suggestion from a specialist agent is evaluated concurrently by a smarter
-judge model (default: llama3.1:8b). A separate concurrent call evaluates overall
-response quality, router accuracy, and relevance. All judge calls are fire-and-forget
-with a passthrough fallback so the main pipeline never crashes.
+Tier 1 (per-suggestion, parallel): safety audit — forbidden paths, factuality,
+  risk escalation. Binary block/approve per suggestion.
+
+Tier 2 (holistic, concurrent): quality scoring 1–5 across three dimensions
+  (grounding, specificity, relevance). Blocks the entire answer if score < 3.
+
+Both tiers run concurrently via ThreadPoolExecutor. Either tier failing open
+  (passthrough) is always surfaced to the user via judge_failed flag.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 import json
 import textwrap
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from openai import OpenAI
 
@@ -27,33 +31,53 @@ from src.agents import AgentResult
 class SuggestionVerdict:
     index: int
     approved: bool
-    adjusted_risk: str   # may be escalated above the original; never lowered
-    block_reason: str    # empty string if approved
-    factual: bool        # False if cited paths/sizes not found verbatim in raw data
-    factuality_note: str # explanation when factual=False
+    adjusted_risk: str   # may be escalated above original; never lowered
+    block_reason: str    # empty if approved
+    factual: bool        # False if cited paths/sizes not found verbatim in data
+    factuality_note: str
+
+
+@dataclass
+class _HolisticResult:
+    """Internal result from _judge_holistic(); not exposed outside this module."""
+    score: int           # 1–5 overall quality; 0 = judge failed
+    score_reason: str
+    score_grounding: int
+    score_specificity: int
+    score_relevance: int
+    router_correct: bool
+    router_note: str
+    failed: bool
+    failure_reason: str
 
 
 @dataclass
 class JudgeVerdict:
     verdicts: list[SuggestionVerdict]
-    router_domain_correct: bool
-    router_note: str
-    response_relevant: bool
-    relevance_note: str
-    overall_quality: str   # GOOD | ACCEPTABLE | POOR
-    quality_note: str
-    judge_model: str
+    # ── Quality score (Tier 2) ────────────────────────────────────────────────
+    score: int = 0              # 1–5 overall; 0 means judge failed to score
+    score_reason: str = ""
+    score_grounding: int = 0    # 1–5
+    score_specificity: int = 0  # 1–5
+    score_relevance: int = 0    # 1–5
+    answer_blocked: bool = False  # True when 0 < score < 3
+    # ── Router check ─────────────────────────────────────────────────────────
+    router_domain_correct: bool = True
+    router_note: str = ""
+    # ── Meta ─────────────────────────────────────────────────────────────────
+    judge_model: str = ""
+    judge_failed: bool = False
+    failure_reason: str = ""
 
 
 @dataclass
 class JudgedResult:
     agent_result: AgentResult
     verdict: JudgeVerdict
-    domain: str = ""   # router domain: storage | battery | health | network | startup
+    domain: str = ""
 
     @property
     def approved_suggestions(self) -> list[tuple[str, str]]:
-        """List of (suggestion_text, adjusted_risk) for approved suggestions."""
         return [
             (self.agent_result.suggestions[v.index], v.adjusted_risk)
             for v in self.verdict.verdicts
@@ -62,7 +86,6 @@ class JudgedResult:
 
     @property
     def blocked_suggestions(self) -> list[tuple[str, str]]:
-        """List of (suggestion_text, block_reason) for blocked suggestions."""
         return [
             (self.agent_result.suggestions[v.index], v.block_reason)
             for v in self.verdict.verdicts
@@ -74,6 +97,13 @@ class JudgedResult:
         return any(not v.approved for v in self.verdict.verdicts)
 
     @property
+    def is_answer_blocked(self) -> bool:
+        """True when quality score is 1 or 2. Fails open on judge failure."""
+        if self.verdict.judge_failed:
+            return False
+        return 0 < self.verdict.score < 3
+
+    @property
     def has_warnings(self) -> bool:
         risk_escalated = any(
             v.approved and v.adjusted_risk != self.agent_result.risk_levels[v.index]
@@ -83,12 +113,18 @@ class JudgedResult:
             v.approved and not v.factual
             for v in self.verdict.verdicts
         )
+        dim_warning = (
+            0 < self.verdict.score_grounding < 4
+            or 0 < self.verdict.score_specificity < 4
+            or 0 < self.verdict.score_relevance < 4
+            or self.verdict.score == 3
+        )
         return (
             risk_escalated
             or factuality_issues
             or not self.verdict.router_domain_correct
-            or not self.verdict.response_relevant
-            or self.verdict.overall_quality == "POOR"
+            or dim_warning
+            or self.verdict.judge_failed
         )
 
 
@@ -100,23 +136,29 @@ _SUGGESTION_SYSTEM = textwrap.dedent("""\
     You are a safety auditor for a computer diagnostic assistant.
     Evaluate ONLY the single suggestion provided. Respond with ONLY valid JSON — no other text.
 
+    === SAFE TO DELETE OVERRIDE (HIGHEST PRIORITY) ===
+    The RAW SYSTEM DATA contains a section called "SAFE TO DELETE". Any path that
+    appears VERBATIM in that section has already been verified as safe by the system.
+    You MUST approve suggestions that target ONLY paths listed in "SAFE TO DELETE".
+    Do NOT block these suggestions — they are pre-approved regardless of their path prefix.
+    Examples of safe paths that must NOT be blocked if they appear in SAFE TO DELETE:
+      ~/Library/Caches  ~/Library/Logs  ~/Library/Saved Application State
+      ~/.npm  ~/.docker  ~/.gradle  ~/.pip  ~/.cache  /tmp  /var/tmp
+
     === FORBIDDEN PATHS ===
-    Block any suggestion that recommends deleting, modifying, moving, or touching:
+    Block suggestions that target paths NOT in "SAFE TO DELETE" AND that touch:
 
     System directories:
       /System  /bin  /sbin  /usr/bin  /usr/lib  /usr/sbin  /etc  /var  /boot
       /lib  /lib64  /proc  /sys  /private/etc  /private/var
       C:\\Windows  C:\\Windows\\System32  C:\\Windows\\SysWOW64
 
-    User-critical credential and config paths:
-      ~/.ssh  ~/.gnupg  ~/.aws  ~/.kube  ~/.config
+    User-critical credential and config paths (block even if in SAFE TO DELETE):
+      ~/.ssh  ~/.gnupg  ~/.aws  ~/.kube
       ~/Library/Keychains  ~/Library/Preferences/com.apple.*
       ~/.netrc  ~/.gitconfig  ~/.zshrc  ~/.bashrc  ~/.bash_profile  ~/.profile
 
-    Also block bulk home-directory deletions (e.g. "delete everything in ~/",
-    "clear your home folder") unless the suggestion is narrowly scoped to a named
-    cache or temp subdirectory that already appears in the SAFE TO DELETE section
-    of the raw data.
+    Block bulk deletions of entire home directory (rm -rf ~/ or equivalent).
 
     === FACTUALITY RULE ===
     A suggestion is factual ONLY if every path, filename, process name, and numeric
@@ -124,9 +166,9 @@ _SUGGESTION_SYSTEM = textwrap.dedent("""\
     If the suggestion invents any path or value, mark factual as false.
 
     === RISK ESCALATION RULE ===
-    - Escalate adjusted_risk to CRITICAL and set approved=false for any forbidden path.
-    - Escalate to HIGH if the suggestion involves file or process deletion and the
-      original risk is LOW or MEDIUM.
+    - Escalate adjusted_risk to CRITICAL and set approved=false for forbidden paths above.
+    - Escalate to HIGH if the suggestion involves deleting files NOT in SAFE TO DELETE.
+    - Suggestions targeting SAFE TO DELETE paths keep their original risk level.
     - Never lower the risk level below what the agent assigned.
 
     === OUTPUT FORMAT ===
@@ -138,23 +180,57 @@ _SUGGESTION_SYSTEM = textwrap.dedent("""\
 """)
 
 _HOLISTIC_SYSTEM = textwrap.dedent("""\
-    You are a quality auditor for a computer diagnostic assistant.
-    Evaluate the agent's response against three criteria. Respond with ONLY valid JSON.
+    You are a quality judge for a computer diagnostic assistant.
+    Score the agent's response across three dimensions and give an overall score.
+    All scores are integers 1–5. Respond with ONLY valid JSON — no other text.
 
-    1. ROUTER ACCURACY: Did the router correctly classify the user's question into the
-       given domain? (storage / battery / health / network / startup)
+    IMPORTANT: If the overall score is 1 or 2, the answer will be BLOCKED and not
+    shown to the user. Score honestly.
 
-    2. RESPONSE RELEVANCE: Does the agent's full response actually answer what the user asked?
-       A response that lists generic tips without addressing the specific question is not relevant.
+    === SCORING RUBRIC ===
 
-    3. OVERALL QUALITY: Rate the response.
-       - GOOD: directly answers the question, suggestions are specific and actionable
-       - ACCEPTABLE: mostly answers the question but is vague or incomplete
-       - POOR: off-topic, generic, or fails to address the user's actual situation
+    GROUNDING — are all cited values from the real collected system data?
+      5: Every path, size, process name appears verbatim in the raw data
+      4: Nearly all grounded; at most 1 minor discrepancy
+      3: Most values grounded; 2–3 approximated but not invented
+      2: Several fabricated values
+      1: Majority of cited values are invented
+
+    SPECIFICITY — are suggestions specific and actionable?
+      5: Each suggestion includes exact command, path/process, and size from the data
+      4: Most suggestions have specific commands and data references
+      3: Mix of specific and generic suggestions
+      2: Mostly generic tips without data ("clear your cache", "restart")
+      1: No specific actions; pure generic advice
+
+    RELEVANCE — does the response answer what the user actually asked?
+      5: Directly and completely addresses the user's exact question
+      4: Answers the main question with minor tangents
+      3: Partially addresses the question
+      2: Addresses a related but different question
+      1: Off-topic or refuses to answer
+
+    OVERALL — holistic quality gate:
+      5: Excellent — significantly helpful, grounded, specific
+      4: Good — helpful with minor gaps
+      3: Acceptable — minimum quality worth showing to the user
+      2: Poor — generic, mostly unhelpful, or mostly not grounded
+      1: Unacceptable — misleading, irrelevant, or dangerous
+
+    Also check whether the router correctly classified the domain
+    (storage / battery / health / network / startup).
 
     === OUTPUT FORMAT ===
     Respond with ONLY this JSON object, nothing else:
-    {"router_domain_correct": true, "router_note": "", "response_relevant": true, "relevance_note": "", "overall_quality": "GOOD", "quality_note": ""}
+    {
+      "score": 4,
+      "score_reason": "one sentence explaining the overall score",
+      "grounding": 5,
+      "specificity": 4,
+      "relevance": 4,
+      "router_correct": true,
+      "router_note": ""
+    }
 """)
 
 
@@ -173,50 +249,49 @@ class Judge:
         result: AgentResult,
         user_prompt: str,
         domain: str,
+        history: list[dict] | None = None,
     ) -> JudgeVerdict:
         """
-        Evaluate all suggestions in parallel plus one holistic call.
-        Returns a passthrough verdict (all approved) if anything goes wrong
-        so the main pipeline never crashes.
+        Run Tier 1 (per-suggestion safety) and Tier 2 (holistic quality) concurrently.
+        Returns a passthrough verdict on failure — judge_failed=True surfaces the error.
         """
         try:
-            n = len(result.suggestions)
-
             with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
                 sug_futures: list[Future[SuggestionVerdict]] = [
                     pool.submit(
                         self._judge_single_suggestion,
-                        i,
-                        sug,
-                        risk,
-                        result.raw_data_summary,
-                        user_prompt,
+                        i, sug, risk, result.raw_data_summary, user_prompt,
                     )
                     for i, (sug, risk) in enumerate(
                         zip(result.suggestions, result.risk_levels)
                     )
                 ]
-                holistic_future: Future[tuple] = pool.submit(
-                    self._judge_holistic, result, user_prompt, domain
+                holistic_future: Future[_HolisticResult] = pool.submit(
+                    self._judge_holistic, result, user_prompt, domain, history
                 )
 
             verdicts = [f.result() for f in sug_futures]
-            router_ok, router_note, relevant, rel_note, quality, q_note = (
-                holistic_future.result()
-            )
+            h = holistic_future.result()
 
             return JudgeVerdict(
                 verdicts=verdicts,
-                router_domain_correct=router_ok,
-                router_note=router_note,
-                response_relevant=relevant,
-                relevance_note=rel_note,
-                overall_quality=quality,
-                quality_note=q_note,
+                score=h.score,
+                score_reason=h.score_reason,
+                score_grounding=h.score_grounding,
+                score_specificity=h.score_specificity,
+                score_relevance=h.score_relevance,
+                answer_blocked=(0 < h.score < 3),
+                router_domain_correct=h.router_correct,
+                router_note=h.router_note,
                 judge_model=self.model,
+                judge_failed=h.failed,
+                failure_reason=h.failure_reason,
             )
-        except Exception:
-            return self._passthrough_verdict(len(result.suggestions), self.model)
+        except Exception as exc:
+            return self._passthrough_verdict(
+                len(result.suggestions), self.model,
+                failed=True, reason=str(exc),
+            )
 
     def _judge_single_suggestion(
         self,
@@ -270,33 +345,61 @@ class Judge:
         result: AgentResult,
         user_prompt: str,
         domain: str,
-    ) -> tuple[bool, str, bool, str, str, str]:
-        user_msg = textwrap.dedent(f"""\
-            === USER'S QUESTION ===
-            {user_prompt}
-
-            === ROUTER CLASSIFIED THIS AS ===
-            {domain}
-
-            === AGENT THAT RESPONDED ===
-            {result.agent}
-
-            === AGENT'S FULL RESPONSE ===
-            {result.full_response}
-        """)
+        history: list[dict] | None = None,
+    ) -> _HolisticResult:
         try:
+            history_section = ""
+            if history:
+                turns = []
+                for msg in history:
+                    role = "User" if msg.get("role") == "user" else "Assistant"
+                    turns.append(f"{role}: {msg.get('content', '')}")
+                history_section = (
+                    "\n=== PRIOR CONVERSATION (for context) ===\n"
+                    + "\n".join(turns)
+                    + "\n"
+                )
+
+            user_msg = textwrap.dedent(f"""\
+                {history_section}
+                === USER'S CURRENT QUESTION ===
+                {user_prompt}
+
+                === ROUTER CLASSIFIED THIS AS ===
+                {domain}
+
+                === AGENT THAT RESPONDED ===
+                {result.agent}
+
+                === AGENT'S FULL RESPONSE ===
+                {result.full_response}
+
+                IMPORTANT: If there is prior conversation above, evaluate the current
+                question and answer in that context. A short follow-up like "why?" or
+                "tell me more" is RELEVANT if the response addresses the prior topic.
+                Do not penalise relevance for brevity of the question itself.
+            """)
             raw = self._llm_call(_HOLISTIC_SYSTEM, user_msg)
             data = _parse_json(raw)
-            return (
-                bool(data.get("router_domain_correct", True)),
-                str(data.get("router_note", "")),
-                bool(data.get("response_relevant", True)),
-                str(data.get("relevance_note", "")),
-                str(data.get("overall_quality", "GOOD")).upper(),
-                str(data.get("quality_note", "")),
+            score = max(1, min(5, int(data.get("score", 3))))
+            return _HolisticResult(
+                score=score,
+                score_reason=str(data.get("score_reason", "")),
+                score_grounding=max(1, min(5, int(data.get("grounding", 3)))),
+                score_specificity=max(1, min(5, int(data.get("specificity", 3)))),
+                score_relevance=max(1, min(5, int(data.get("relevance", 3)))),
+                router_correct=bool(data.get("router_correct", True)),
+                router_note=str(data.get("router_note", "")),
+                failed=False,
+                failure_reason="",
             )
-        except Exception:
-            return (True, "", True, "", "GOOD", "")
+        except Exception as exc:
+            return _HolisticResult(
+                score=0, score_reason="", score_grounding=0,
+                score_specificity=0, score_relevance=0,
+                router_correct=True, router_note="",
+                failed=True, failure_reason=str(exc),
+            )
 
     def _llm_call(self, system: str, user: str) -> str:
         response = self.client.chat.completions.create(
@@ -306,31 +409,37 @@ class Judge:
                 {"role": "user", "content": user},
             ],
             temperature=0.0,
+            response_format={"type": "json_object"},
         )
         return response.choices[0].message.content or ""
 
     @staticmethod
-    def _passthrough_verdict(n: int, model: str) -> JudgeVerdict:
-        """Fully-approved, no-warning verdict used when the judge fails entirely."""
+    def _passthrough_verdict(
+        n: int,
+        model: str,
+        failed: bool = False,
+        reason: str = "",
+    ) -> JudgeVerdict:
+        """Passthrough verdict: all suggestions approved, score=0, answer not blocked."""
         return JudgeVerdict(
             verdicts=[
                 SuggestionVerdict(
-                    index=i,
-                    approved=True,
-                    adjusted_risk="",
-                    block_reason="",
-                    factual=True,
-                    factuality_note="",
+                    index=i, approved=True, adjusted_risk="",
+                    block_reason="", factual=True, factuality_note="",
                 )
                 for i in range(n)
             ],
+            score=0,
+            score_reason="",
+            score_grounding=0,
+            score_specificity=0,
+            score_relevance=0,
+            answer_blocked=False,
             router_domain_correct=True,
             router_note="",
-            response_relevant=True,
-            relevance_note="",
-            overall_quality="GOOD",
-            quality_note="",
             judge_model=model,
+            judge_failed=failed,
+            failure_reason=reason,
         )
 
 
@@ -347,13 +456,16 @@ _RISK_RANK: dict[str, int] = {
 
 
 def _parse_json(raw: str) -> dict:
-    """Extract the first JSON object from raw LLM output."""
+    """Extract and parse the first JSON object from raw LLM output."""
     raw = raw.strip()
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise ValueError("No JSON object found in judge output")
-    return json.loads(raw[start:end])
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start == -1 or end == 0:
+            raise ValueError("No JSON object found in judge output")
+        return json.loads(raw[start:end])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -366,8 +478,9 @@ def run_judge(
     domain: str,
     client: OpenAI,
     model: str,
+    history: list[dict] | None = None,
 ) -> JudgedResult:
     """Instantiate Judge, run evaluation, wrap into JudgedResult."""
     judge = Judge(client=client, model=model)
-    verdict = judge.evaluate(result, user_prompt, domain)
+    verdict = judge.evaluate(result, user_prompt, domain, history=history)
     return JudgedResult(agent_result=result, verdict=verdict, domain=domain)

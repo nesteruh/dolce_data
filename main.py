@@ -29,8 +29,8 @@ except ImportError:
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_API_KEY  = os.getenv("OLLAMA_API_KEY",  "ollama")
-MODEL           = os.getenv("AGENT_MODEL",      "llama3.2")
-JUDGE_MODEL     = os.getenv("JUDGE_MODEL",      "llama3.1:8b")
+MODEL           = os.getenv("AGENT_MODEL",  "llama3.2")
+JUDGE_MODEL     = os.getenv("JUDGE_MODEL",  MODEL)
 
 BANNER = """
 ╔══════════════════════════════════════════════════════╗
@@ -84,6 +84,19 @@ def _show_raw_data(raw: str, agent: str) -> None:
         print("-"*60 + "\n")
 
 
+def _stars(score: int, total: int = 5) -> str:
+    """Render a star rating string, e.g. '★★★☆☆'."""
+    return "★" * score + "☆" * (total - score)
+
+
+def _score_color(score: int) -> str:
+    if score >= 4:
+        return "green"
+    if score == 3:
+        return "yellow"
+    return "red"
+
+
 def _show_answer(answer: str) -> None:
     if _RICH:
         console.print(Panel(Markdown(answer), title="[bold green]Assistant[/bold green]",
@@ -94,8 +107,39 @@ def _show_answer(answer: str) -> None:
         print("="*60 + "\n")
 
 
+def _show_blocked_answer(judged) -> None:
+    """Render a red panel when the quality score blocks the answer."""
+    verdict = judged.verdict
+    score = verdict.score
+    if _RICH:
+        sc = _score_color(score)
+        lines = [
+            f"[bold red]Answer blocked by quality gate[/bold red]",
+            f"  Score: [{sc}]{_stars(score)}  {score}/5[/{sc}]",
+        ]
+        if verdict.score_reason:
+            lines.append(f"  [dim]{verdict.score_reason}[/dim]")
+        lines.append("")
+        lines.append("[dim]The response did not meet the minimum quality threshold (3/5).[/dim]")
+        lines.append("[dim]Try rephrasing your question with more detail.[/dim]")
+        console.print(Panel(
+            "\n".join(lines),
+            title="[bold red]Answer Blocked[/bold red]",
+            border_style="red",
+            padding=(1, 2),
+        ))
+    else:
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print(f"ANSWER BLOCKED  (score: {score}/5)")
+        if verdict.score_reason:
+            print(f"  {verdict.score_reason}")
+        print("  Response did not meet the minimum quality threshold (3/5).")
+        print(sep + "\n")
+
+
 def _show_judge_verdict(judged) -> None:
-    """Always render an LLM-as-a-Judge panel showing the full evaluation."""
+    """Render the LLM-as-a-Judge panel with numeric scores and suggestion verdicts."""
     verdict = judged.verdict
     ar = judged.agent_result
 
@@ -103,6 +147,31 @@ def _show_judge_verdict(judged) -> None:
 
     if _RICH:
         lines: list[str] = []
+
+        # ── Judge failure warning ─────────────────────────────────────────────
+        if verdict.judge_failed:
+            reason = f": {verdict.failure_reason}" if verdict.failure_reason else ""
+            lines.append(f"[bold red]⚠  Judge evaluation failed{reason}.[/bold red]")
+            lines.append("[red]  Suggestions have NOT been safety-verified.[/red]")
+            lines.append("")
+
+        # ── Quality score block ───────────────────────────────────────────────
+        if verdict.score > 0:
+            sc = _score_color(verdict.score)
+            lines.append("[bold]Quality Score[/bold]")
+            lines.append(f"  [{sc}]{_stars(verdict.score)}  {verdict.score}/5[/{sc}]")
+            if verdict.score_grounding > 0:
+                gc = _score_color(verdict.score_grounding)
+                lines.append(f"  [dim]└ Grounding   [{gc}]{_stars(verdict.score_grounding)}  {verdict.score_grounding}/5[/{gc}][/dim]")
+            if verdict.score_specificity > 0:
+                spc = _score_color(verdict.score_specificity)
+                lines.append(f"  [dim]└ Specificity [{spc}]{_stars(verdict.score_specificity)}  {verdict.score_specificity}/5[/{spc}][/dim]")
+            if verdict.score_relevance > 0:
+                rc2 = _score_color(verdict.score_relevance)
+                lines.append(f"  [dim]└ Relevance   [{rc2}]{_stars(verdict.score_relevance)}  {verdict.score_relevance}/5[/{rc2}][/dim]")
+            if verdict.score_reason:
+                lines.append(f"  [dim italic]\"{verdict.score_reason}\"[/dim italic]")
+        lines.append("")
 
         # ── Suggestions section ───────────────────────────────────────────────
         n = len(verdict.verdicts)
@@ -125,9 +194,7 @@ def _show_judge_verdict(judged) -> None:
                     else:
                         rc = _RISK_COLOR.get(orig_risk, "white")
                         risk_display = f"[{rc}]{orig_risk}[/{rc}]"
-
                     lines.append(f"  [green]✓[/green]  {risk_display:<30}  {sug}")
-
                     if not v.factual and v.factuality_note:
                         lines.append(f"     [yellow]⚠ Hallucination detected:[/yellow] [dim]{v.factuality_note}[/dim]")
                 else:
@@ -138,39 +205,15 @@ def _show_judge_verdict(judged) -> None:
 
         lines.append("")
 
-        # ── Response checks section ───────────────────────────────────────────
+        # ── Router check ──────────────────────────────────────────────────────
         lines.append("[bold]Response checks[/bold]")
-
         router_icon = "[green]✓[/green]" if verdict.router_domain_correct else "[yellow]⚠[/yellow]"
         router_detail = (
             f"[dim]{verdict.router_note}[/dim]"
             if verdict.router_note and not verdict.router_domain_correct
             else f"[dim]Correctly routed to {ar.agent}[/dim]"
         )
-        lines.append(f"  {router_icon}  [bold]Router    [/bold]  {router_detail}")
-
-        rel_icon = "[green]✓[/green]" if verdict.response_relevant else "[yellow]⚠[/yellow]"
-        rel_detail = (
-            f"[dim]{verdict.relevance_note}[/dim]"
-            if verdict.relevance_note and not verdict.response_relevant
-            else "[dim]Response addresses the user's question[/dim]"
-        )
-        lines.append(f"  {rel_icon}  [bold]Relevance [/bold]  {rel_detail}")
-
-        qc = _RISK_COLOR.get(
-            {"GOOD": "LOW", "ACCEPTABLE": "MEDIUM", "POOR": "HIGH"}.get(verdict.overall_quality, "LOW"),
-            "green",
-        )
-        q_icon = "[green]✓[/green]" if verdict.overall_quality == "GOOD" else "[yellow]⚠[/yellow]"
-        q_detail = (
-            f"[dim]{verdict.quality_note}[/dim]"
-            if verdict.quality_note and verdict.overall_quality != "GOOD"
-            else ""
-        )
-        lines.append(
-            f"  {q_icon}  [bold]Quality   [/bold]  [{qc}]{verdict.overall_quality}[/{qc}]"
-            + (f"  {q_detail}" if q_detail else "")
-        )
+        lines.append(f"  {router_icon}  [bold]Router[/bold]  {router_detail}")
 
         console.print(Panel(
             "\n".join(lines),
@@ -185,6 +228,20 @@ def _show_judge_verdict(judged) -> None:
         print(f"\n{sep}")
         print(f"LLM-AS-A-JUDGE  ({verdict.judge_model})")
         print(sep)
+
+        if verdict.judge_failed:
+            reason = f": {verdict.failure_reason}" if verdict.failure_reason else ""
+            print(f"  ⚠  Judge evaluation failed{reason}.")
+            print("     Suggestions have NOT been safety-verified.")
+            print()
+
+        if verdict.score > 0:
+            print(f"  Quality  {verdict.score}/5  {_stars(verdict.score)}")
+            if verdict.score_grounding:
+                print(f"    Grounding:   {verdict.score_grounding}/5  Specificity: {verdict.score_specificity}/5  Relevance: {verdict.score_relevance}/5")
+            if verdict.score_reason:
+                print(f"    \"{verdict.score_reason}\"")
+            print()
 
         n = len(verdict.verdicts)
         if n == 0:
@@ -206,13 +263,8 @@ def _show_judge_verdict(judged) -> None:
                         print(f"     ↳ {v.block_reason}")
 
         print()
-        print("  Response checks:")
         router_ok = "✓" if verdict.router_domain_correct else "⚠"
-        print(f"  {router_ok}  Router     {verdict.router_note or f'Correctly routed to {ar.agent}'}")
-        rel_ok = "✓" if verdict.response_relevant else "⚠"
-        print(f"  {rel_ok}  Relevance  {verdict.relevance_note or 'Response addresses the question'}")
-        q_ok = "✓" if verdict.overall_quality == "GOOD" else "⚠"
-        print(f"  {q_ok}  Quality    {verdict.overall_quality}" + (f"  {verdict.quality_note}" if verdict.quality_note and verdict.overall_quality != "GOOD" else ""))
+        print(f"  {router_ok}  Router  {verdict.router_note or f'Correctly routed to {ar.agent}'}")
         print(sep)
 
 
@@ -248,6 +300,9 @@ def main() -> None:
             print(f"  • {ex}")
         print("\nType 'quit' to exit.\n")
 
+    _MAX_HISTORY_TURNS = 6  # keep last 3 exchanges (6 messages: 3 user + 3 assistant)
+    conversation_history: list[dict] = []
+
     while True:
         try:
             user_input = _ask("You").strip()
@@ -263,10 +318,19 @@ def main() -> None:
             break
 
         try:
-            result = _spinner_call(handle, user_input, client, MODEL,
-                                   judge_model=JUDGE_MODEL, verbose=False)
+            result = _spinner_call(
+                handle, user_input, client, MODEL,
+                judge_model=JUDGE_MODEL, verbose=False,
+                history=conversation_history[-_MAX_HISTORY_TURNS:] or None,
+            )
             _show_raw_data(result.agent_result.raw_data_summary, result.agent_result.agent)
-            _show_answer(result.agent_result.full_response)
+            if result.is_answer_blocked:
+                _show_blocked_answer(result)
+            else:
+                _show_answer(result.agent_result.full_response)
+                # Only record successful (non-blocked) turns in session memory
+                conversation_history.append({"role": "user", "content": user_input})
+                conversation_history.append({"role": "assistant", "content": result.agent_result.analysis})
             _show_judge_verdict(result)
             from src.history import save_entry
             save_entry(user_input, result)
