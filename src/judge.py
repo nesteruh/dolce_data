@@ -49,6 +49,7 @@ class JudgeVerdict:
 class JudgedResult:
     agent_result: AgentResult
     verdict: JudgeVerdict
+    domain: str = ""   # router domain: storage | battery | health | network | startup
 
     @property
     def approved_suggestions(self) -> list[tuple[str, str]]:
@@ -369,4 +370,4 @@ def run_judge(
     """Instantiate Judge, run evaluation, wrap into JudgedResult."""
     judge = Judge(client=client, model=model)
     verdict = judge.evaluate(result, user_prompt, domain)
-    return JudgedResult(agent_result=result, verdict=verdict)
+    return JudgedResult(agent_result=result, verdict=verdict, domain=domain)

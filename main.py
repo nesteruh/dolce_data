@@ -265,6 +265,8 @@ def main() -> None:
             _show_raw_data(result.agent_result.raw_data_summary, result.agent_result.agent)
             _show_answer(result.agent_result.full_response)
             _show_judge_verdict(result)
+            from src.history import save_entry
+            save_entry(user_input, result)
         except Exception as exc:
             _print(f"\n⚠️  Error: {exc}", "bold red")
             _print("Make sure Ollama is running and the model is available.", "dim")

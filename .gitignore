@@ -2,3 +2,4 @@
 .history
 __pycache__
 db_storage/
+logs/
