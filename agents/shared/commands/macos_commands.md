@@ -58,12 +58,12 @@ Each entry follows this structure:
 ---
 
 ### CMD_ID: `storage.largest_dirs`
-- **Purpose**: Top 10 largest directories in the user's home folder (non-recursive)
+- **Purpose**: Sizes of cleanup-relevant home directories (Library excluded — covered by cache commands)
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  du -sh ~/*/  2>/dev/null | sort -rh | head -10
+  du -sh ~/Desktop ~/Downloads ~/Documents ~/Movies ~/Music ~/Pictures ~/Applications ~/Public 2>/dev/null | sort -rh
   ```
 
 ---
@@ -260,12 +260,12 @@ Each entry follows this structure:
 ---
 
 ### CMD_ID: `battery.health_summary`
-- **Purpose**: Filtered view of capacity and health fields only
+- **Purpose**: Filtered view of capacity and health fields only (fast via ioreg)
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  system_profiler SPPowerDataType | grep -E "Cycle Count|Full Charge Capacity|Design Capacity|Condition|Charging"
+  ioreg -l -w 0 | grep -E '"CycleCount"|"DesignCapacity"|"MaxCapacity"|"ExternalConnected"|"BatteryHealth"'
   ```
 
 ---
@@ -309,7 +309,7 @@ Each entry follows this structure:
 - **Requires**: nothing
 - **Command**:
   ```
-  system_profiler SPBluetoothDataType | grep "State"
+  defaults read /Library/Preferences/com.apple.Bluetooth ControllerPowerState 2>/dev/null | awk '{print "Bluetooth power state:", ($1==1 ? "ON" : "OFF")}'
   ```
 
 ---
@@ -495,12 +495,12 @@ Each entry follows this structure:
 ---
 
 ### CMD_ID: `health.gpu_info`
-- **Purpose**: GPU model, VRAM, and Metal support info
+- **Purpose**: GPU model, VRAM, and Metal support info (fast via -detailLevel mini)
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  system_profiler SPDisplaysDataType | grep -E "Chipset Model|VRAM|Metal"
+  system_profiler SPDisplaysDataType -detailLevel mini 2>/dev/null | grep -E "Chipset Model|VRAM|Metal"
   ```
 
 ---

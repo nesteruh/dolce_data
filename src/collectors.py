@@ -8,6 +8,7 @@ No shell commands are hardcoded here.
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from src.command_registry import CommandRegistry
@@ -25,6 +26,34 @@ def detect_os() -> str:
     return "unknown"
 
 
+def _run_parallel(
+    reg: CommandRegistry,
+    tasks: dict[str, str],
+    timeouts: dict[str, int] | None = None,
+) -> dict[str, str]:
+    """
+    Execute multiple reg.run() calls concurrently.
+
+    tasks:    {field_name: cmd_id}
+    timeouts: {field_name: seconds} — overrides the default 15s per command
+    Returns   {field_name: result_string}
+    """
+    timeouts = timeouts or {}
+    results: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = {
+            executor.submit(reg.run, cmd_id, timeouts.get(field, 15)): field
+            for field, cmd_id in tasks.items()
+        }
+        for future in as_completed(futures):
+            field = futures[future]
+            try:
+                results[field] = future.result()
+            except Exception as exc:
+                results[field] = f"ERROR: {exc}"
+    return results
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Storage
 # ─────────────────────────────────────────────────────────────────────────────
@@ -38,7 +67,6 @@ class StorageData:
     cache_breakdown: str = ""
     trash_size: str = ""
     downloads_old: str = ""
-    files_over_1gb: str = ""
     xcode_derived: str = ""     # macOS only
     apt_cache: str = ""         # Linux only
     journal_logs: str = ""      # Linux only
@@ -48,20 +76,22 @@ def collect_storage(os_name: str) -> StorageData:
     reg = CommandRegistry(os_name)
     data = StorageData(os_name=os_name)
 
-    data.volumes       = reg.run("storage.disk_overview")
-    data.largest_dirs  = reg.run("storage.largest_dirs")
-    data.cache_size    = reg.run("storage.user_cache_size")
-    data.cache_breakdown = reg.run("storage.user_cache_breakdown")
-    data.trash_size    = reg.run("storage.trash_size")
-    data.downloads_old = reg.run("storage.downloads_old")
-    data.files_over_1gb = reg.run("storage.files_over_1gb")
-
+    tasks: dict[str, str] = {
+        "volumes":        "storage.disk_overview",
+        "largest_dirs":   "storage.largest_dirs",
+        "cache_size":     "storage.user_cache_size",
+        "cache_breakdown": "storage.user_cache_breakdown",
+        "trash_size":     "storage.trash_size",
+        "downloads_old":  "storage.downloads_old",
+    }
     if os_name == "macos":
-        data.xcode_derived = reg.run("storage.xcode_derived_data")
-
+        tasks["xcode_derived"] = "storage.xcode_derived_data"
     if os_name == "linux":
-        data.apt_cache    = reg.run("storage.apt_cache_size")
-        data.journal_logs = reg.run("storage.journal_log_size")
+        tasks["apt_cache"]    = "storage.apt_cache_size"
+        tasks["journal_logs"] = "storage.journal_log_size"
+
+    for field, value in _run_parallel(reg, tasks, timeouts={"largest_dirs": 12}).items():
+        setattr(data, field, value)
 
     return data
 
@@ -79,7 +109,6 @@ class BatteryData:
     energy_consumers: str = ""
     bluetooth: str = ""         # macOS only
     wifi: str = ""              # macOS only
-    power_log: str = ""         # macOS only
     charge_level: str = ""      # Linux only
     charge_status: str = ""     # Linux only
     design_capacity: str = ""   # Linux only
@@ -91,26 +120,30 @@ def collect_battery(os_name: str) -> BatteryData:
     reg = CommandRegistry(os_name)
     data = BatteryData(os_name=os_name)
 
-    data.energy_consumers = reg.run("battery.top_energy_consumers")
+    tasks: dict[str, str] = {
+        "energy_consumers": "battery.top_energy_consumers",
+    }
 
     if os_name == "macos":
-        data.quick_status   = reg.run("battery.quick_status")
-        data.health_detail  = reg.run("battery.health_summary")
-        data.power_settings = reg.run("battery.power_settings")
-        data.power_log      = reg.run("battery.power_log")
-        data.bluetooth      = reg.run("battery.bluetooth_status")
-        data.wifi           = reg.run("battery.wifi_status")
+        tasks["quick_status"]   = "battery.quick_status"
+        tasks["health_detail"]  = "battery.health_summary"
+        tasks["power_settings"] = "battery.power_settings"
+        tasks["bluetooth"]      = "battery.bluetooth_status"
+        tasks["wifi"]           = "battery.wifi_status"
 
     elif os_name == "linux":
-        data.charge_level    = reg.run("battery.charge_level")
-        data.charge_status   = reg.run("battery.charge_status")
-        data.design_capacity = reg.run("battery.design_capacity")
-        data.current_capacity = reg.run("battery.current_max_capacity")
-        data.health_detail   = reg.run("battery.upower_detail")
+        tasks["charge_level"]    = "battery.charge_level"
+        tasks["charge_status"]   = "battery.charge_status"
+        tasks["design_capacity"] = "battery.design_capacity"
+        tasks["current_capacity"] = "battery.current_max_capacity"
+        tasks["health_detail"]   = "battery.upower_detail"
 
     elif os_name == "windows":
-        data.quick_status = reg.run("battery.quick_status")
-        data.power_plan   = reg.run("battery.power_plan_current")
+        tasks["quick_status"] = "battery.quick_status"
+        tasks["power_plan"]   = "battery.power_plan_current"
+
+    for field, value in _run_parallel(reg, tasks).items():
+        setattr(data, field, value)
 
     return data
 
@@ -133,7 +166,6 @@ class HealthData:
     zombie_procs: str = ""
     gpu_info: str = ""
     uptime: str = ""
-    # Optional extended
     memory_summary: str = ""    # macOS
     total_ram: str = ""         # macOS
     gpu_usage: str = ""         # Windows
@@ -145,32 +177,38 @@ def collect_health(os_name: str) -> HealthData:
     reg = CommandRegistry(os_name)
     data = HealthData(os_name=os_name)
 
-    # Common across all OSes
-    data.cpu_overview  = reg.run("health.cpu_overview")
-    data.load_avg      = reg.run("health.load_avg")
-    data.cpu_model     = reg.run("health.cpu_model")
-    data.core_count    = reg.run("health.cpu_core_count")
-    data.top_cpu_procs = reg.run("health.top_cpu_procs")
-    data.top_mem_procs = reg.run("health.top_mem_procs")
-    data.zombie_procs  = reg.run("health.zombie_procs")
-    data.gpu_info      = reg.run("health.gpu_info")
-    data.uptime        = reg.run("health.uptime")
+    tasks: dict[str, str] = {
+        "cpu_overview":  "health.cpu_overview",
+        "load_avg":      "health.load_avg",
+        "cpu_model":     "health.cpu_model",
+        "core_count":    "health.cpu_core_count",
+        "top_cpu_procs": "health.top_cpu_procs",
+        "top_mem_procs": "health.top_mem_procs",
+        "zombie_procs":  "health.zombie_procs",
+        "gpu_info":      "health.gpu_info",
+        "uptime":        "health.uptime",
+    }
 
     if os_name == "macos":
-        data.memory_summary = reg.run("health.memory_summary")
-        data.total_ram      = reg.run("health.total_ram")
-        data.memory_overview = reg.run("health.memory_overview")
-        data.swap_usage     = data.memory_summary   # summary includes swap line
+        tasks["memory_summary"]  = "health.memory_summary"
+        tasks["total_ram"]       = "health.total_ram"
+        tasks["memory_overview"] = "health.memory_overview"
 
     elif os_name == "linux":
-        data.memory_overview = reg.run("health.memory_overview")
-        data.swap_usage      = reg.run("health.swap_usage")
-        data.temperatures    = reg.run("health.temperatures")
+        tasks["memory_overview"] = "health.memory_overview"
+        tasks["swap_usage"]      = "health.swap_usage"
+        tasks["temperatures"]    = "health.temperatures"
 
     elif os_name == "windows":
-        data.memory_overview = reg.run("health.memory_overview")
-        data.swap_usage      = reg.run("health.swap_usage")
-        data.gpu_usage       = reg.run("health.gpu_usage")
-        data.not_responding  = reg.run("health.not_responding_procs")
+        tasks["memory_overview"] = "health.memory_overview"
+        tasks["swap_usage"]      = "health.swap_usage"
+        tasks["gpu_usage"]       = "health.gpu_usage"
+        tasks["not_responding"]  = "health.not_responding_procs"
+
+    for field, value in _run_parallel(reg, tasks).items():
+        setattr(data, field, value)
+
+    if os_name == "macos":
+        data.swap_usage = data.memory_summary  # summary includes the swap line
 
     return data

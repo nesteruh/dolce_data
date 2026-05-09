@@ -3,7 +3,7 @@ Specialist agents: Storage, Battery, Health.
 Each agent:
   1. Collects real system data via collectors.py
   2. Builds a structured context prompt
-  3. Calls the LLM to produce analysis + suggestions
+  3. Calls the LLM to produce a polished, user-facing response
   4. Returns a formatted AgentResult
 """
 
@@ -44,14 +44,20 @@ class AgentResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_BASE = textwrap.dedent("""\
-    You are a specialist computer assistant agent. Your job is to:
-    1. Analyse the raw system data provided to you.
-    2. Explain clearly what is causing any issues.
-    3. List specific, actionable suggestions — each on its own line starting with
-       "SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <action>".
-    4. Be concise. No filler. Focus on the most impactful items first.
-    5. NEVER suggest deleting system files, disabling security features, or
-       any action that could destabilize the OS.
+    You are a specialist computer assistant. Analyse the system data provided
+    and respond directly to the user in this exact format:
+
+    1. ONE or TWO sentences directly answering the user's question.
+    2. A brief plain-language explanation of the root cause.
+    3. A numbered list of suggestions — most impactful first. Each suggestion
+       must be on its own line in this format:
+       SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <specific action>
+    4. One short, encouraging closing sentence.
+
+    Keep the total response under 300 words. Be direct. Avoid jargon unless
+    you explain it in plain language immediately after.
+    NEVER suggest deleting system files, disabling security features, or any
+    action that could destabilise the OS.
 """)
 
 
@@ -73,13 +79,11 @@ def _parse_suggestions(text: str) -> tuple[list[str], list[str]]:
     risks = []
     for line in text.splitlines():
         if line.strip().upper().startswith("SUGGESTION"):
-            # Format: SUGGESTION [RISK:LOW]: do something
             risk = "LOW"
             if "[RISK:HIGH]" in line.upper():
                 risk = "HIGH"
             elif "[RISK:MEDIUM]" in line.upper():
                 risk = "MEDIUM"
-            # Strip the prefix to get plain text
             content = line.split(":", 2)[-1].strip() if ":" in line else line
             suggestions.append(content)
             risks.append(risk)
@@ -125,6 +129,9 @@ def run_storage_agent(
 
         === DOWNLOADS OLDER THAN 30 DAYS ===
         {data.downloads_old or '(none found)'}
+
+        === XCODE DERIVED DATA ===
+        {data.xcode_derived or '(no data / Xcode not installed)'}
     """)
 
     user_msg = textwrap.dedent(f"""\
@@ -133,8 +140,8 @@ def run_storage_agent(
         Here is the current system storage data:
         {raw_summary}
 
-        Analyse this data, explain the storage situation, identify what is using the most
-        space, and provide specific suggestions. Use the SUGGESTION format for each action.
+        Analyse this data, explain the storage situation, identify what is using
+        the most space, and provide specific suggestions.
     """)
 
     llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg)
@@ -183,6 +190,10 @@ def run_battery_agent(
 
         === POWER SETTINGS ===
         {data.power_settings or '(no data)'}
+
+        === CONNECTIVITY (power drain factors) ===
+        Bluetooth: {data.bluetooth or '(no data)'}
+        Wi-Fi: {data.wifi or '(no data)'}
     """)
 
     user_msg = textwrap.dedent(f"""\
@@ -191,9 +202,9 @@ def run_battery_agent(
         Here is the current battery and power data:
         {raw_summary}
 
-        Diagnose why the battery may be draining quickly. Identify the biggest energy
-        consumers, comment on battery health if data is available, and give specific
-        suggestions. Use the SUGGESTION format for each action.
+        Diagnose why the battery may be draining quickly. Identify the biggest
+        energy consumers, comment on battery health if data is available, and
+        give specific suggestions.
     """)
 
     llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg)
@@ -235,17 +246,25 @@ def run_health_agent(
     raw_summary = textwrap.dedent(f"""\
         OS: {os_name}
 
-        === CPU OVERVIEW (load avg, cores, model) ===
-        {data.cpu_overview or '(no data)'}
+        === CPU OVERVIEW ===
+        Model: {data.cpu_model or '(no data)'}
+        Cores: {data.core_count or '(no data)'}
+        Load averages (1/5/15 min): {data.load_avg or '(no data)'}
+        Usage snapshot: {data.cpu_overview or '(no data)'}
 
         === TOP CPU PROCESSES ===
         {data.top_cpu_procs or '(no data)'}
 
         === MEMORY OVERVIEW ===
         {data.memory_overview or '(no data)'}
+        Total RAM: {data.total_ram or '(no data)'}
+        Summary: {data.memory_summary or '(no data)'}
 
         === TOP MEMORY PROCESSES ===
         {data.top_mem_procs or '(no data)'}
+
+        === ZOMBIE PROCESSES ===
+        {data.zombie_procs or '(none)'}
 
         === GPU INFO ===
         {data.gpu_info or '(no data)'}
@@ -260,10 +279,10 @@ def run_health_agent(
         Here is the current system health data:
         {raw_summary}
 
-        Diagnose what is slowing the system down. Identify the top resource consumers,
-        explain whether their usage is normal or abnormal, and give specific, prioritised
-        suggestions. For any process you suggest terminating, explain briefly what it is.
-        Use the SUGGESTION format for each action.
+        Diagnose what is slowing the system down. Identify the top resource
+        consumers, explain whether their usage is normal or abnormal, and give
+        specific, prioritised suggestions. For any process you suggest
+        terminating, explain briefly what it is.
     """)
 
     llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg)

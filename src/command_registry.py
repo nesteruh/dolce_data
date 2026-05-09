@@ -127,9 +127,24 @@ class CommandRegistry:
     """
     Loads the OS-appropriate command file on construction.
     Provides .get(), .run(), and .list() methods.
+    The parsed command table is cached per OS so the markdown file is only
+    read once per process, regardless of how many times CommandRegistry is
+    instantiated.
     """
 
+    _cache: dict[str, "CommandRegistry"] = {}
+
+    def __new__(cls, os_name: str | None = None) -> "CommandRegistry":
+        key = os_name or _detect_os()
+        if key in cls._cache:
+            return cls._cache[key]
+        instance = super().__new__(cls)
+        cls._cache[key] = instance
+        return instance
+
     def __init__(self, os_name: str | None = None) -> None:
+        if hasattr(self, "_commands"):
+            return  # already initialised from cache
         self.os_name = os_name or _detect_os()
         md_path = _OS_FILE_MAP.get(self.os_name)
         if md_path is None or not md_path.exists():
