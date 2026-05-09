@@ -187,16 +187,6 @@ def handle(
         tag = "Domain" if len(domains) == 1 else "Domains"
         print(f"\n[Router] OS={os_name} | {tag}={domains}\n")
 
-    dispatch = {
-        "storage": run_storage_agent,
-        "battery": run_battery_agent,
-        "health":  run_health_agent,
-        "network": run_network_agent,
-        "startup": run_startup_agent,
-        "activity": run_activity_agent
-    }
-    result: AgentResult = dispatch[domain](user_prompt, client, model, os_name, history)
-
     # ── Multi-domain: run agents in parallel ────────────────────────────────
     if verbose:
         print(f"[Router] Dispatching to {len(domains)} agents in parallel…\n")
@@ -206,7 +196,7 @@ def handle(
 
     with ThreadPoolExecutor(max_workers=len(domains)) as executor:
         future_to_domain = {
-            executor.submit(_DISPATCH[domain], user_prompt, client, model, os_name): domain
+            executor.submit(_DISPATCH[domain], user_prompt, client, model, os_name, history): domain
             for domain in domains
         }
         for future in as_completed(future_to_domain):

@@ -624,7 +624,7 @@ _ACTIVITY_SYSTEM = _SYSTEM_BASE + textwrap.dedent("""\
     (e.g. apps opened rarely despite being on boot, or file types that dominate
     recent work). Do NOT make assumptions about file contents — only reference
     names and timestamps visible in the data.
-""")
+""") + _JSON_FORMAT
 
 
 def run_activity_agent(
@@ -632,6 +632,7 @@ def run_activity_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: UserActivityData = collect_user_activity(os_name)
@@ -665,14 +666,15 @@ def run_activity_agent(
         4. Provide suggestions only if they are directly supported by the data shown above.
     """)
 
-    llm_text = _llm_call(client, model, _ACTIVITY_SYSTEM, user_msg)
-    suggestions, risks = _parse_suggestions(llm_text)
+    llm_text = _llm_call(client, model, _ACTIVITY_SYSTEM, user_msg, history)
+    data = json.loads(llm_text)
+    suggestions, risks = _parse_agent_json(data)
 
     return AgentResult(
         agent="ActivityAgent",
         raw_data_summary=raw_summary,
-        analysis=llm_text,
+        analysis=data.get("analysis", ""),
         suggestions=suggestions,
         risk_levels=risks,
-        full_response=llm_text,
+        full_response=_format_full_response(data),
     )
