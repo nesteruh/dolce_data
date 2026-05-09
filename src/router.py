@@ -66,7 +66,7 @@ _AGENT_EMOJI: dict[str, str] = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Multi-domain classifier
+# Multi-domain classifier 
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _classify_domains(prompt: str) -> list[str]:
