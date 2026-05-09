@@ -1,314 +1,605 @@
 # 🐧 Linux Command Reference
-# Used by all agents when detected OS = Linux (sys.platform == 'linux')
-# Format: [Category] → Command — Purpose
+# Single source of truth for all shell commands on Linux.
+# Agents MUST reference commands by their ID (e.g. `storage.disk_overview`).
+# No agent instruction file should contain any shell syntax — only IDs from this file.
 
 ---
 
-## ⚠️ Usage Rules
-- Always use `sudo` only when strictly necessary and with user approval.
-- Prefer non-destructive read-only commands for initial analysis.
-- Commands marked ⚠️ require user confirmation before execution.
-- Commands marked 🚫 are FORBIDDEN — do not execute under any circumstances.
-- Some commands may not be installed by default (e.g., `powertop`, `nvtop`) — check availability first.
+## ⚠️ Global Usage Rules
+
+- Always use `sudo` only when strictly necessary and with explicit user approval.
+- Run READ commands first — never jump to WRITE/DELETE commands without analysing READ output.
+- Commands labelled `RISK: MEDIUM` require one explicit user confirmation.
+- Commands labelled `RISK: HIGH` require confirmation plus a summary of what will be changed.
+- Commands labelled `FORBIDDEN` must never be executed under any circumstances.
+- Check command availability with `which <tool>` before calling optional tools.
+- Adjust battery path (`BAT0`) if the system uses `BAT1` or another index.
+
+---
+
+## 📦 Command Format
+
+```
+### CMD_ID: <domain>.<name>
+- Purpose : what this command does
+- Risk    : NONE | MEDIUM | HIGH | FORBIDDEN
+- Requires: sudo? optional tool? confirmation?
+- Command :
+  <exact shell command>
+```
 
 ---
 
 ## 🗄️ STORAGE COMMANDS
 
-### Disk Usage Overview
-```bash
-# All mounted filesystems
-df -h
+---
 
-# Specific filesystem
-df -h /
+### CMD_ID: `storage.disk_overview`
+- **Purpose**: Show all mounted filesystems with total, used, and free space
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  df -h
+  ```
 
-# Inode usage (for inode exhaustion issues)
-df -i
-```
+---
 
-### File System Analysis
-```bash
-# Disk usage of home directory (top level)
-du -sh ~/*/ 2>/dev/null | sort -rh | head -20
+### CMD_ID: `storage.inode_usage`
+- **Purpose**: Check inode usage per filesystem (useful when disk is "full" despite available space)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  df -i
+  ```
 
-# Largest files in home (recursive)
-find ~ -type f -exec du -sh {} + 2>/dev/null | sort -rh | head -20
+---
 
-# Find files larger than 1GB
-find ~ -size +1G -type f 2>/dev/null
+### CMD_ID: `storage.largest_dirs`
+- **Purpose**: Top 10 largest directories in the user's home folder
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh ~/*/  2>/dev/null | sort -rh | head -10
+  ```
 
-# Find files larger than 500MB
-find ~ -size +500M -type f 2>/dev/null
+---
 
-# Find files in /tmp older than 7 days
-find /tmp -mtime +7 -type f 2>/dev/null
+### CMD_ID: `storage.largest_files`
+- **Purpose**: Top 10 largest individual files recursively under home
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  find ~ -type f -exec du -sh {} + 2>/dev/null | sort -rh | head -10
+  ```
 
-# Files in Downloads older than 30 days
-find ~/Downloads -mtime +30 -type f 2>/dev/null
-```
+---
 
-### Cache Analysis
-```bash
-# User cache size
-du -sh ~/.cache 2>/dev/null
+### CMD_ID: `storage.files_over_1gb`
+- **Purpose**: List files larger than 1 GB in the home folder
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  find ~ -size +1G -type f 2>/dev/null
+  ```
 
-# Per-app cache sizes
-du -sh ~/.cache/* 2>/dev/null | sort -rh | head -20
+---
 
-# System journal logs size
-du -sh /var/log/journal 2>/dev/null
+### CMD_ID: `storage.files_over_500mb`
+- **Purpose**: List files larger than 500 MB in the home folder
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  find ~ -size +500M -type f 2>/dev/null
+  ```
 
-# APT cache (Debian/Ubuntu)
-du -sh /var/cache/apt 2>/dev/null
+---
 
-# DNF/YUM cache (Fedora/RHEL)
-du -sh /var/cache/dnf 2>/dev/null
-du -sh /var/cache/yum 2>/dev/null
+### CMD_ID: `storage.downloads_old`
+- **Purpose**: Files in ~/Downloads not modified in the last 30 days
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  find ~/Downloads -mtime +30 -type f 2>/dev/null
+  ```
 
-# Snap packages (if applicable)
-du -sh /snap 2>/dev/null
+---
 
-# Flatpak data
-du -sh ~/.local/share/flatpak 2>/dev/null
+### CMD_ID: `storage.user_cache_size`
+- **Purpose**: Total size of the user cache directory
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh ~/.cache 2>/dev/null
+  ```
 
-# Thumbnails cache
-du -sh ~/.cache/thumbnails 2>/dev/null
-```
+---
 
-### Trash Analysis
-```bash
-# User trash size
-du -sh ~/.local/share/Trash 2>/dev/null
+### CMD_ID: `storage.user_cache_breakdown`
+- **Purpose**: Per-application cache sizes, sorted largest first
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh ~/.cache/* 2>/dev/null | sort -rh | head -20
+  ```
 
-# List trash contents
-ls -lah ~/.local/share/Trash/files 2>/dev/null
-```
+---
 
-### Cleanup Commands (⚠️ Require User Confirmation)
-```bash
-# Clear user cache
-# ⚠️ CONFIRM FIRST
-rm -rf ~/.cache/*
+### CMD_ID: `storage.apt_cache_size`
+- **Purpose**: Size of APT package download cache (Debian / Ubuntu)
+- **Risk**: NONE
+- **Requires**: apt-based distro
+- **Command**:
+  ```
+  du -sh /var/cache/apt 2>/dev/null
+  ```
 
-# Clear APT cache (Debian/Ubuntu)
-# ⚠️ CONFIRM FIRST
-sudo apt-get clean
+---
 
-# Autoremove unused packages
-# ⚠️ CONFIRM FIRST
-sudo apt-get autoremove
+### CMD_ID: `storage.dnf_cache_size`
+- **Purpose**: Size of DNF/YUM package cache (Fedora / RHEL)
+- **Risk**: NONE
+- **Requires**: dnf or yum
+- **Command**:
+  ```
+  du -sh /var/cache/dnf 2>/dev/null
+  ```
 
-# Clear DNF cache (Fedora)
-# ⚠️ CONFIRM FIRST
-sudo dnf clean all
+---
 
-# Clear systemd journal logs older than 7 days
-# ⚠️ CONFIRM FIRST
-sudo journalctl --vacuum-time=7d
+### CMD_ID: `storage.journal_log_size`
+- **Purpose**: Size of systemd journal logs
+- **Risk**: NONE
+- **Requires**: systemd
+- **Command**:
+  ```
+  du -sh /var/log/journal 2>/dev/null
+  ```
 
-# Clear /tmp manually (use only if /tmp cleanup service is not running)
-# ⚠️ CONFIRM FIRST — never delete /tmp itself, only contents
-sudo find /tmp -type f -atime +7 -delete
+---
 
-# Clear thumbnail cache
-# ⚠️ CONFIRM FIRST
-rm -rf ~/.cache/thumbnails/*
-```
+### CMD_ID: `storage.trash_size`
+- **Purpose**: Size of the user Trash
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh ~/.local/share/Trash 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `storage.trash_list`
+- **Purpose**: List contents of the Trash
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ls -lah ~/.local/share/Trash/files 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `storage.thumbnail_cache_size`
+- **Purpose**: Size of the thumbnail cache
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh ~/.cache/thumbnails 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `storage.clear_user_cache`
+- **Purpose**: Delete all files in the user cache directory
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation
+- **Command**:
+  ```
+  rm -rf ~/.cache/*
+  ```
+
+---
+
+### CMD_ID: `storage.clear_apt_cache`
+- **Purpose**: Remove all APT downloaded package files
+- **Risk**: MEDIUM
+- **Requires**: sudo + explicit user confirmation + apt-based distro
+- **Command**:
+  ```
+  sudo apt-get clean
+  ```
+
+---
+
+### CMD_ID: `storage.apt_autoremove`
+- **Purpose**: Remove unused dependency packages
+- **Risk**: MEDIUM
+- **Requires**: sudo + explicit user confirmation + apt-based distro
+- **Command**:
+  ```
+  sudo apt-get autoremove
+  ```
+
+---
+
+### CMD_ID: `storage.clear_dnf_cache`
+- **Purpose**: Clean all DNF cached data
+- **Risk**: MEDIUM
+- **Requires**: sudo + explicit user confirmation + dnf
+- **Command**:
+  ```
+  sudo dnf clean all
+  ```
+
+---
+
+### CMD_ID: `storage.trim_journal_logs`
+- **Purpose**: Delete systemd journal logs older than 7 days
+- **Risk**: MEDIUM
+- **Requires**: sudo + explicit user confirmation
+- **Command**:
+  ```
+  sudo journalctl --vacuum-time=7d
+  ```
+
+---
+
+### CMD_ID: `storage.clear_thumbnails`
+- **Purpose**: Delete thumbnail cache (rebuilds automatically)
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation
+- **Command**:
+  ```
+  rm -rf ~/.cache/thumbnails/*
+  ```
 
 ---
 
 ## 🔋 BATTERY COMMANDS
 
-### Battery Status
-```bash
-# Battery capacity and status
-cat /sys/class/power_supply/BAT0/capacity       # charge percentage
-cat /sys/class/power_supply/BAT0/status         # Charging / Discharging / Full
-cat /sys/class/power_supply/BAT0/energy_full    # current max capacity (µWh)
-cat /sys/class/power_supply/BAT0/energy_full_design  # design capacity (µWh)
-cat /sys/class/power_supply/BAT0/cycle_count    # cycle count (if supported)
-cat /sys/class/power_supply/BAT0/health         # health status
+---
 
-# Using upower (preferred — more readable)
-upower -i $(upower -e | grep BAT) 2>/dev/null
-
-# List all power devices
-upower -e
-```
-
-### Energy Usage by Process
-```bash
-# PowerTOP (requires install, provides per-process power usage)
-# Note: check if installed first
-which powertop && sudo powertop --time=5 --html=/tmp/powertop_report.html
-
-# Top processes by CPU (proxy for energy usage)
-top -bn1 | head -30
-
-# Processes sorted by CPU
-ps aux --sort=-%cpu | head -15
-```
-
-### Power Settings (⚠️ Require User Confirmation)
-```bash
-# Check current power profile (TLP)
-sudo tlp-stat -s 2>/dev/null
-
-# Set to power-save profile (TLP)
-# ⚠️ CONFIRM FIRST
-sudo tlp bat 2>/dev/null
-
-# Set CPU governor to powersave
-# ⚠️ CONFIRM FIRST
-echo powersave | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-
-# Set CPU governor to performance (for AC)
-# ⚠️ CONFIRM FIRST
-echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-```
+### CMD_ID: `battery.charge_level`
+- **Purpose**: Current battery charge percentage
+- **Risk**: NONE
+- **Requires**: `/sys/class/power_supply/BAT0/` to exist
+- **Command**:
+  ```
+  cat /sys/class/power_supply/BAT0/capacity 2>/dev/null
+  ```
 
 ---
 
-## 💻 CPU / GPU / RAM COMMANDS
+### CMD_ID: `battery.charge_status`
+- **Purpose**: Charging / Discharging / Full status
+- **Risk**: NONE
+- **Requires**: `/sys/class/power_supply/BAT0/` to exist
+- **Command**:
+  ```
+  cat /sys/class/power_supply/BAT0/status 2>/dev/null
+  ```
 
-### CPU Overview
-```bash
-# CPU info
-cat /proc/cpuinfo | grep -E "model name|cpu cores" | uniq
+---
 
-# Number of logical CPUs
-nproc
+### CMD_ID: `battery.health_condition`
+- **Purpose**: Battery health string (Good / Degraded / etc.)
+- **Risk**: NONE
+- **Requires**: `/sys/class/power_supply/BAT0/` to exist
+- **Command**:
+  ```
+  cat /sys/class/power_supply/BAT0/health 2>/dev/null
+  ```
 
-# Real-time CPU usage (1 iteration)
-top -bn1 | grep "Cpu(s)"
+---
 
-# Load averages
-cat /proc/loadavg
-uptime
+### CMD_ID: `battery.current_max_capacity`
+- **Purpose**: Current full-charge capacity in micro-watt-hours
+- **Risk**: NONE
+- **Requires**: `/sys/class/power_supply/BAT0/` to exist
+- **Command**:
+  ```
+  cat /sys/class/power_supply/BAT0/energy_full 2>/dev/null
+  ```
 
-# Per-core CPU usage
-mpstat -P ALL 1 1 2>/dev/null || top -bn1
+---
 
-# Top 10 processes by CPU
-ps aux --sort=-%cpu | head -11
+### CMD_ID: `battery.design_capacity`
+- **Purpose**: Original design capacity in micro-watt-hours
+- **Risk**: NONE
+- **Requires**: `/sys/class/power_supply/BAT0/` to exist
+- **Command**:
+  ```
+  cat /sys/class/power_supply/BAT0/energy_full_design 2>/dev/null
+  ```
 
-# CPU frequency
-cat /proc/cpuinfo | grep "cpu MHz"
-```
+---
 
-### RAM / Memory
-```bash
-# Memory overview (human-readable)
-free -h
+### CMD_ID: `battery.cycle_count`
+- **Purpose**: Number of charge cycles (not all hardware reports this)
+- **Risk**: NONE
+- **Requires**: `/sys/class/power_supply/BAT0/cycle_count` to exist
+- **Command**:
+  ```
+  cat /sys/class/power_supply/BAT0/cycle_count 2>/dev/null
+  ```
 
-# Detailed memory stats
-cat /proc/meminfo
+---
 
-# Virtual memory stats (includes swap activity)
-vmstat 1 5
+### CMD_ID: `battery.upower_detail`
+- **Purpose**: Full battery report via upower (capacity, state, technology)
+- **Risk**: NONE
+- **Requires**: `upower` installed
+- **Command**:
+  ```
+  upower -i $(upower -e | grep BAT) 2>/dev/null
+  ```
 
-# Top 10 processes by RAM
-ps aux --sort=-%mem | head -11
+---
 
-# Memory usage in MB per process
-ps -eo pid,comm,%mem,rss --sort=-%mem | head -20
+### CMD_ID: `battery.top_energy_consumers`
+- **Purpose**: Processes sorted by CPU usage as energy impact proxy
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ps aux --sort=-%cpu | head -15
+  ```
 
-# Swap usage
-swapon --show
-cat /proc/swaps
-```
+---
 
-### GPU Usage
-```bash
-# NVIDIA GPU (requires nvidia-smi)
-nvidia-smi
+### CMD_ID: `battery.powertop_report`
+- **Purpose**: Generate an HTML energy usage report per-process
+- **Risk**: NONE
+- **Requires**: `powertop` installed + sudo
+- **Command**:
+  ```
+  sudo powertop --time=5 --html=/tmp/powertop_report.html
+  ```
 
-# NVIDIA GPU — continuous monitoring
-watch -n 1 nvidia-smi
+---
 
-# NVIDIA GPU — process-level usage
-nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+### CMD_ID: `battery.set_cpu_powersave`
+- **Purpose**: Set CPU frequency governor to power-save mode
+- **Risk**: MEDIUM
+- **Requires**: sudo + explicit user confirmation + cpufreq support
+- **Command**:
+  ```
+  echo powersave | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+  ```
 
-# AMD GPU (requires radeontop)
-radeontop -d - -l 1 2>/dev/null
+---
 
-# AMD GPU via sysfs
-cat /sys/class/drm/card0/device/gpu_busy_percent 2>/dev/null
+### CMD_ID: `battery.set_cpu_performance`
+- **Purpose**: Set CPU frequency governor to performance mode (AC use)
+- **Risk**: MEDIUM
+- **Requires**: sudo + explicit user confirmation + cpufreq support
+- **Command**:
+  ```
+  echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+  ```
 
-# Intel GPU (requires intel_gpu_top)
-sudo intel_gpu_top -l 2>/dev/null
+---
 
-# Check installed GPU
-lspci | grep -E "VGA|3D|Display"
-```
+## 💻 HEALTH (CPU / GPU / RAM) COMMANDS
 
-### Process Management
-```bash
-# List all processes
-ps aux
+---
 
-# Find process by name
-pgrep -la "processname"
+### CMD_ID: `health.cpu_model`
+- **Purpose**: CPU model name and core count from /proc/cpuinfo
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  cat /proc/cpuinfo | grep -E "model name|cpu cores" | uniq
+  ```
 
-# Process tree
-pstree -p
+---
 
-# Graceful quit (⚠️ CONFIRM FIRST)
-kill -15 <PID>
+### CMD_ID: `health.cpu_core_count`
+- **Purpose**: Number of logical CPU cores available
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  nproc
+  ```
 
-# Force quit (⚠️ CONFIRM FIRST — last resort)
-kill -9 <PID>
+---
 
-# Kill by name (⚠️ CONFIRM FIRST)
-pkill -15 "processname"
+### CMD_ID: `health.cpu_overview`
+- **Purpose**: Real-time CPU usage percentages (1 snapshot)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  top -bn1 | grep "Cpu(s)"
+  ```
 
-# Check zombie processes
-ps aux | awk '$8 == "Z"'
-```
+---
 
-### System Health
-```bash
-# System uptime
-uptime
+### CMD_ID: `health.load_avg`
+- **Purpose**: 1-minute, 5-minute, 15-minute load averages
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  cat /proc/loadavg
+  ```
 
-# System info
-uname -a
+---
 
-# Hardware info
-sudo dmidecode -t memory 2>/dev/null | grep -E "Size|Speed|Type"
-lshw -short 2>/dev/null
+### CMD_ID: `health.top_cpu_procs`
+- **Purpose**: Top 15 processes sorted by CPU usage
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ps aux --sort=-%cpu | head -16
+  ```
 
-# Temperature sensors (requires lm-sensors)
-sensors 2>/dev/null
+---
 
-# Disk health (requires smartmontools)
-sudo smartctl -a /dev/sda 2>/dev/null
-```
+### CMD_ID: `health.memory_overview`
+- **Purpose**: Human-readable memory and swap summary
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  free -h
+  ```
+
+---
+
+### CMD_ID: `health.memory_detail`
+- **Purpose**: Full /proc/meminfo with all memory categories
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  cat /proc/meminfo
+  ```
+
+---
+
+### CMD_ID: `health.swap_usage`
+- **Purpose**: Active swap devices and their usage
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  swapon --show
+  ```
+
+---
+
+### CMD_ID: `health.top_mem_procs`
+- **Purpose**: Top 15 processes sorted by memory usage with RSS values
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ps -eo pid,comm,%cpu,%mem,rss --sort=-%mem | head -16
+  ```
+
+---
+
+### CMD_ID: `health.zombie_procs`
+- **Purpose**: List any defunct (zombie) processes
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ps aux | awk '$8 == "Z"'
+  ```
+
+---
+
+### CMD_ID: `health.uptime`
+- **Purpose**: System uptime and load averages
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  uptime
+  ```
+
+---
+
+### CMD_ID: `health.gpu_list`
+- **Purpose**: List GPU adapters detected by the system
+- **Risk**: NONE
+- **Requires**: `lspci` installed
+- **Command**:
+  ```
+  lspci 2>/dev/null | grep -Ei "VGA|3D|Display"
+  ```
+
+---
+
+### CMD_ID: `health.nvidia_gpu_status`
+- **Purpose**: NVIDIA GPU utilization, temperature, memory usage
+- **Risk**: NONE
+- **Requires**: `nvidia-smi` installed
+- **Command**:
+  ```
+  nvidia-smi
+  ```
+
+---
+
+### CMD_ID: `health.amd_gpu_usage`
+- **Purpose**: AMD GPU busy percentage via sysfs
+- **Risk**: NONE
+- **Requires**: AMD GPU present
+- **Command**:
+  ```
+  cat /sys/class/drm/card0/device/gpu_busy_percent 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `health.temperatures`
+- **Purpose**: CPU and hardware sensor temperatures
+- **Risk**: NONE
+- **Requires**: `lm-sensors` installed and configured
+- **Command**:
+  ```
+  sensors 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `health.find_proc_by_name`
+- **Purpose**: Find PID and full command for a running process by name
+- **Risk**: NONE
+- **Requires**: process name parameter `<name>`
+- **Command**:
+  ```
+  pgrep -la "<name>"
+  ```
+
+---
+
+### CMD_ID: `health.graceful_kill`
+- **Purpose**: Send SIGTERM to a process — ask it to shut down gracefully
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + PID parameter `<pid>`
+- **Command**:
+  ```
+  kill -15 <pid>
+  ```
+
+---
+
+### CMD_ID: `health.force_kill`
+- **Purpose**: Send SIGKILL — use only if graceful kill did not work
+- **Risk**: HIGH
+- **Requires**: explicit user confirmation + confirmation graceful kill was tried + PID `<pid>`
+- **Command**:
+  ```
+  kill -9 <pid>
+  ```
 
 ---
 
 ## 🚫 FORBIDDEN COMMANDS (Linux)
+> These command IDs exist only to document what must NEVER be executed.
+> Agents must refuse any user request that maps to these.
 
-```bash
-# DO NOT RUN — Wipes entire filesystem
-rm -rf /
-rm -rf /*
-
-# DO NOT RUN — Kills init process (crashes system)
-sudo kill -9 1
-
-# DO NOT RUN — Disables SELinux (security vulnerability)
-sudo setenforce 0
-sudo sed -i 's/SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config
-
-# DO NOT RUN — Drops all firewall rules
-sudo iptables -F
-sudo ufw disable
-
-# DO NOT RUN — Fork bomb
-:(){ :|:& };:
-
-# DO NOT modify /proc or /sys filesystem entries directly
-# (these may crash the system or corrupt kernel state)
-```
+| CMD_ID (Forbidden)                  | Reason                                       |
+|-------------------------------------|----------------------------------------------|
+| `forbidden.rm_root`                 | Wipes the entire root filesystem             |
+| `forbidden.kill_init`               | Kills PID 1 (systemd/init) — crashes the OS |
+| `forbidden.disable_selinux`         | Removes mandatory access control permanently |
+| `forbidden.flush_iptables`          | Drops all firewall rules immediately         |
+| `forbidden.fork_bomb`               | Exhausts system resources — denial of service|
