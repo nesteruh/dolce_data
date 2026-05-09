@@ -58,12 +58,12 @@ Each entry follows this structure:
 ---
 
 ### CMD_ID: `storage.largest_dirs`
-- **Purpose**: Top 10 largest directories in the user's home folder (non-recursive)
+- **Purpose**: Sizes of cleanup-relevant home directories (Library excluded — covered by cache commands)
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  du -sh ~/*/  2>/dev/null | sort -rh | head -10
+  du -sh ~/Desktop ~/Downloads ~/Documents ~/Movies ~/Music ~/Pictures ~/Applications ~/Public 2>/dev/null | sort -rh
   ```
 
 ---
@@ -101,13 +101,24 @@ Each entry follows this structure:
 
 ---
 
-### CMD_ID: `storage.downloads_old`
-- **Purpose**: List files in ~/Downloads not modified in the last 30 days
+### CMD_ID: `storage.downloads_large`
+- **Purpose**: Files larger than 50 MB in Downloads with their sizes, sorted largest first
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  find ~/Downloads -mtime +30 -type f 2>/dev/null
+  find ~/Downloads -maxdepth 2 -type f -size +50M -exec du -sh {} + 2>/dev/null | sort -rh | head -15
+  ```
+
+---
+
+### CMD_ID: `storage.area_breakdown`
+- **Purpose**: Sizes of the main Library subdirectories that consume the most space
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh ~/Library/Caches ~/Library/Application\ Support ~/Library/Containers ~/Library/Developer ~/Library/Logs ~/Applications 2>/dev/null | sort -rh
   ```
 
 ---
@@ -163,6 +174,17 @@ Each entry follows this structure:
 - **Command**:
   ```
   du -sh ~/Library/Developer/Xcode/Archives 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `storage.path_size`
+- **Purpose**: Get the disk usage of a specific path (used for safe-deletables catalogue)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh "<path>"
   ```
 
 ---
@@ -260,12 +282,12 @@ Each entry follows this structure:
 ---
 
 ### CMD_ID: `battery.health_summary`
-- **Purpose**: Filtered view of capacity and health fields only
+- **Purpose**: Filtered view of capacity and health fields only (fast via ioreg)
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  system_profiler SPPowerDataType | grep -E "Cycle Count|Full Charge Capacity|Design Capacity|Condition|Charging"
+  ioreg -l -w 0 | grep -E '"CycleCount"|"DesignCapacity"|"MaxCapacity"|"ExternalConnected"|"BatteryHealth"'
   ```
 
 ---
@@ -309,7 +331,7 @@ Each entry follows this structure:
 - **Requires**: nothing
 - **Command**:
   ```
-  system_profiler SPBluetoothDataType | grep "State"
+  defaults read /Library/Preferences/com.apple.Bluetooth ControllerPowerState 2>/dev/null | awk '{print "Bluetooth power state:", ($1==1 ? "ON" : "OFF")}'
   ```
 
 ---
@@ -495,12 +517,12 @@ Each entry follows this structure:
 ---
 
 ### CMD_ID: `health.gpu_info`
-- **Purpose**: GPU model, VRAM, and Metal support info
+- **Purpose**: GPU model, VRAM, and Metal support info (fast via -detailLevel mini)
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  system_profiler SPDisplaysDataType | grep -E "Chipset Model|VRAM|Metal"
+  system_profiler SPDisplaysDataType -detailLevel mini 2>/dev/null | grep -E "Chipset Model|VRAM|Metal"
   ```
 
 ---
