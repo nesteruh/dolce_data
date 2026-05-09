@@ -1,15 +1,9 @@
 """
-core/vector_store.py — ChromaDB wrapper for storing and querying document chunks.
+core/vector_store.py -- ChromaDB wrapper for semantic search.
 
-How the embedding pipeline works:
-  1. Text chunks are passed to ChromaDB's OllamaEmbeddingFunction.
-  2. That function calls the local Ollama HTTP API (/api/embeddings) to generate
-     vector embeddings using the `nomic-embed-text` model.
-  3. ChromaDB stores the embeddings in a local SQLite-backed file under DB_PATH.
-  4. At query time, the same function embeds the query string and ChromaDB finds
-     the nearest neighbours by cosine similarity.
-
-Everything stays 100% offline — no cloud calls are made at any point.
+Pure vector search using Ollama (nomic-embed-text) embeddings.
+BM25 / hybrid search removed -- ranking quality is handled by the LLM
+reranker in retrieval/searcher.py.
 """
 
 import hashlib
@@ -19,103 +13,98 @@ from pathlib import Path
 import chromadb
 from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
 
-from config import (
-    CHUNK_SIZE,        # imported only so config is the single source of truth
-    COLLECTION_NAME,
-    DB_PATH,
-    OLLAMA_MODEL,
-    OLLAMA_URL,
-)
+from config import COLLECTION_NAME, DB_PATH, OLLAMA_MODEL, OLLAMA_URL
 
 logger = logging.getLogger(__name__)
 
 
 class VectorStore:
-    """Thin wrapper around a ChromaDB persistent collection."""
+    """ChromaDB wrapper: add, delete, and search child chunks by embedding."""
 
     def __init__(self) -> None:
-        # Ensure the storage directory exists before ChromaDB tries to open it.
-        db_path = Path(DB_PATH)
-        db_path.mkdir(parents=True, exist_ok=True)
+        Path(DB_PATH).mkdir(parents=True, exist_ok=True)
 
-        # PersistentClient writes everything to disk under DB_PATH.
-        self._client = chromadb.PersistentClient(path=str(db_path))
-
-        # Wire up the local Ollama embedding function.
-        # ChromaDB will call this automatically whenever it needs to embed text.
+        self._client = chromadb.PersistentClient(path=DB_PATH)
         self._embedding_fn = OllamaEmbeddingFunction(
             model_name=OLLAMA_MODEL,
             url=OLLAMA_URL,
         )
-
-        # get_or_create_collection is idempotent — safe to call on every startup.
         self._collection = self._client.get_or_create_collection(
             name=COLLECTION_NAME,
             embedding_function=self._embedding_fn,
-            metadata={"hnsw:space": "cosine"},  # cosine similarity for semantic search
+            metadata={"hnsw:space": "cosine"},
         )
-
         logger.info(
-            "VectorStore ready — collection '%s' has %d documents.",
+            "VectorStore ready -- collection '%s' has %d chunks.",
             COLLECTION_NAME,
             self._collection.count(),
         )
 
-    # ── Public API ─────────────────────────────────────────────────────────────
+    # ── Indexing ───────────────────────────────────────────────────────────────
 
     def add_chunks(self, chunks: list[dict]) -> None:
         """
-        Upsert a list of text chunks into the ChromaDB collection.
-
-        Uses deterministic IDs (sha256 of file_path + chunk index) so that
-        re-indexing the same file never creates duplicate entries.
-
-        Args:
-            chunks: List of dicts returned by chunker.chunk_text().
-                    Each dict must have keys "text_chunk" and "metadata".
+        Upsert child chunks into ChromaDB.
+        Each chunk dict must have keys 'text_chunk' and 'metadata'.
+        IDs are deterministic (sha256) so re-indexing is safe.
         """
         if not chunks:
             return
 
-        ids: list[str] = []
-        documents: list[str] = []
-        metadatas: list[dict] = []
-
+        ids, documents, metadatas = [], [], []
         for i, chunk in enumerate(chunks):
-            # Build a stable ID that is unique per (file, chunk_position).
-            raw_id = f"{chunk['metadata']['file_path']}::{i}"
-            chunk_id = hashlib.sha256(raw_id.encode()).hexdigest()
-
-            ids.append(chunk_id)
+            raw_id = f"{chunk['metadata']['file_path']}::{chunk['metadata'].get('chunk_index', i)}"
+            ids.append(hashlib.sha256(raw_id.encode()).hexdigest())
             documents.append(chunk["text_chunk"])
             metadatas.append(chunk["metadata"])
 
-        # upsert: insert new, overwrite existing — handles re-indexing gracefully.
-        self._collection.upsert(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-        )
+        self._collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
-    def search(self, query_text: str, n_results: int = 5) -> dict:
+    def delete_by_parent(self, parent_id: str) -> None:
+        """Remove all child chunks belonging to a parent document."""
+        results = self._collection.get(where={"parent_id": {"$eq": parent_id}})
+        if results["ids"]:
+            self._collection.delete(ids=results["ids"])
+            logger.info("Deleted %d chunks for parent %s", len(results["ids"]), parent_id[:8])
+
+    # ── Search ─────────────────────────────────────────────────────────────────
+
+    def search(
+        self, query: str, n: int, where: dict | None = None
+    ) -> list[dict]:
         """
-        Embed the query and return the most similar chunks from the collection.
+        Embed the query and retrieve the top-n most similar chunks.
 
         Args:
-            query_text: Natural language search string from the user.
-            n_results:  How many chunk matches to retrieve.
+            query: Natural language query string.
+            n:     Number of chunk results to retrieve.
+            where: Optional ChromaDB metadata filter dict.
+                   Example: {"file_extension": {"$eq": ".pdf"}}
 
         Returns:
-            Raw ChromaDB result dict with keys: ids, documents, metadatas,
-            distances. The caller (searcher.py) extracts what it needs.
+            List of chunk dicts: {chunk_id, text, metadata, distance}
+            Sorted best-first (lowest cosine distance).
         """
-        # Clamp n_results to the number of stored documents to avoid ChromaDB errors.
         stored = self._collection.count()
         if stored == 0:
-            return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+            return []
 
-        n = min(n_results, stored)
-        return self._collection.query(
-            query_texts=[query_text],
-            n_results=n,
-        )
+        n = min(n, stored)
+        kwargs: dict = {"query_texts": [query], "n_results": n}
+        if where:
+            kwargs["where"] = where
+
+        raw = self._collection.query(**kwargs)
+
+        chunks = []
+        for chunk_id, text, meta, dist in zip(
+            raw["ids"][0], raw["documents"][0], raw["metadatas"][0], raw["distances"][0]
+        ):
+            chunks.append({
+                "chunk_id": chunk_id,
+                "text":     text,
+                "metadata": meta,
+                "distance": dist,
+            })
+
+        return chunks
