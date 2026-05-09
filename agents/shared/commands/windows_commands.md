@@ -504,6 +504,252 @@
 
 ---
 
+## 🌐 NETWORK COMMANDS
+
+### CMD_ID: `network.interfaces`
+- **Purpose**: List all network adapters with status and IP addresses
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetAdapter | Select-Object Name, Status, LinkSpeed, MacAddress | Format-Table
+  Get-NetIPAddress | Select-Object InterfaceAlias, AddressFamily, IPAddress | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.routing_table`
+- **Purpose**: Show default gateway and routing table
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetRoute | Where-Object DestinationPrefix -eq '0.0.0.0/0' | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.active_connections`
+- **Purpose**: All established and listening TCP connections with owning process IDs
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetTCPConnection | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess | Sort-Object State | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.listening_ports`
+- **Purpose**: Only ports currently listening for incoming connections
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetTCPConnection -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess | Sort-Object LocalPort | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.connections_with_process_names`
+- **Purpose**: Active connections enriched with process names (not just PIDs)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetTCPConnection | Where-Object State -eq 'Established' |
+    Select-Object LocalPort, RemoteAddress, RemotePort, OwningProcess,
+      @{N='Process';E={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name}} |
+    Sort-Object Process | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.bandwidth_by_adapter`
+- **Purpose**: Bytes sent/received per network adapter
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetAdapterStatistics | Select-Object Name, ReceivedBytes, SentBytes | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.dns_config`
+- **Purpose**: Show configured DNS servers per interface
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-DnsClientServerAddress | Where-Object ServerAddresses | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.firewall_status`
+- **Purpose**: Check Windows Firewall enabled state per profile (Domain/Private/Public)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetFirewallProfile | Select-Object Name, Enabled | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.firewall_rules_active`
+- **Purpose**: List currently enabled inbound firewall rules
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetFirewallRule | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' } |
+    Select-Object DisplayName, Action, Profile | Sort-Object Action | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.vpn_detection`
+- **Purpose**: Detect TAP/WireGuard/VPN adapter interfaces
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "TAP|WireGuard|VPN|Tunnel" } | Format-Table
+  ```
+
+---
+
+### CMD_ID: `network.flush_dns`
+- **Purpose**: Clear the Windows DNS resolver cache
+- **Risk**: LOW
+- **Requires**: explicit user confirmation
+- **Command**:
+  ```powershell
+  Clear-DnsClientCache
+  ```
+
+---
+
+## 🚀 STARTUP / SERVICE COMMANDS
+
+### CMD_ID: `startup.list_registry_run_user`
+- **Purpose**: List current-user startup programs from registry Run key
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-ItemProperty "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" |
+    Select-Object * -ExcludeProperty PSPath, PSParentPath, PSChildName, PSDrive, PSProvider
+  ```
+
+---
+
+### CMD_ID: `startup.list_registry_run_system`
+- **Purpose**: List all-users startup programs from registry Run key
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" |
+    Select-Object * -ExcludeProperty PSPath, PSParentPath, PSChildName, PSDrive, PSProvider
+  ```
+
+---
+
+### CMD_ID: `startup.list_startup_folder`
+- **Purpose**: List programs in the user Startup folder
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" | Format-Table Name, LastWriteTime
+  ```
+
+---
+
+### CMD_ID: `startup.list_scheduled_tasks`
+- **Purpose**: List non-Microsoft scheduled tasks that run at logon or boot
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-ScheduledTask | Where-Object {
+    $_.State -eq 'Ready' -and $_.TaskPath -notmatch '^\\Microsoft\\'
+  } | Select-Object TaskName, TaskPath, State | Format-Table
+  ```
+
+---
+
+### CMD_ID: `startup.list_auto_services`
+- **Purpose**: List services configured to start automatically
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```powershell
+  Get-Service | Where-Object StartType -eq 'Automatic' |
+    Select-Object Name, DisplayName, Status | Sort-Object Status | Format-Table
+  ```
+
+---
+
+### CMD_ID: `startup.service_status`
+- **Purpose**: Check status of a specific service by name
+- **Risk**: NONE
+- **Requires**: service name parameter `<ServiceName>`
+- **Command**:
+  ```powershell
+  Get-Service -Name "<ServiceName>" | Select-Object Name, DisplayName, Status, StartType | Format-List
+  ```
+
+---
+
+### CMD_ID: `startup.disable_service`
+- **Purpose**: Set a service startup type to Disabled (does not stop it immediately)
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + service name `<ServiceName>`
+- **Command**:
+  ```powershell
+  Set-Service -Name "<ServiceName>" -StartupType Disabled
+  ```
+
+---
+
+### CMD_ID: `startup.stop_and_disable_service`
+- **Purpose**: Stop a running service and disable it from starting at boot
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + service name `<ServiceName>`
+- **Command**:
+  ```powershell
+  Stop-Service -Name "<ServiceName>" -Force -ErrorAction SilentlyContinue
+  Set-Service -Name "<ServiceName>" -StartupType Disabled
+  ```
+
+---
+
+### CMD_ID: `startup.enable_service`
+- **Purpose**: Re-enable a disabled service (sets to Automatic startup)
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + service name `<ServiceName>`
+- **Command**:
+  ```powershell
+  Set-Service -Name "<ServiceName>" -StartupType Automatic
+  ```
+
+---
+
+### CMD_ID: `startup.remove_registry_run_entry`
+- **Purpose**: Remove a startup entry from the user Run registry key
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + entry name `<EntryName>`
+- **Command**:
+  ```powershell
+  Remove-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" -Name "<EntryName>"
+  ```
+
+---
+
 ## 🚫 FORBIDDEN COMMANDS (Windows)
 > These command IDs exist only to document what must NEVER be executed.
 > Agents must refuse any user request that maps to these.

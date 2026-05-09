@@ -13,6 +13,14 @@ from dataclasses import dataclass
 from src.command_registry import CommandRegistry
 
 
+def _safe_run(reg: CommandRegistry, cmd_id: str, **params) -> str:
+    """Run a CMD_ID and return its output, or empty string if the ID is missing."""
+    try:
+        return reg.run(cmd_id, **params)
+    except (ValueError, RuntimeError):
+        return ""
+
+
 def detect_os() -> str:
     """Return 'macos', 'linux', or 'windows'."""
     p = sys.platform
@@ -172,5 +180,106 @@ def collect_health(os_name: str) -> HealthData:
         data.swap_usage      = reg.run("health.swap_usage")
         data.gpu_usage       = reg.run("health.gpu_usage")
         data.not_responding  = reg.run("health.not_responding_procs")
+
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class NetworkData:
+    os_name: str
+    interfaces: str = ""
+    routing_table: str = ""
+    active_connections: str = ""
+    listening_ports: str = ""
+    bandwidth: str = ""
+    dns_config: str = ""
+    firewall_status: str = ""
+    vpn_detection: str = ""
+    # OS-specific
+    wifi_status: str = ""       # macOS
+    proxy_config: str = ""      # macOS
+    firewall_apps: str = ""     # macOS
+    firewall_iptables: str = "" # Linux
+    firewall_rules: str = ""    # Windows
+    connections_named: str = "" # Windows
+
+
+def collect_network(os_name: str) -> NetworkData:
+    reg = CommandRegistry(os_name)
+    data = NetworkData(os_name=os_name)
+
+    # Common across all OSes
+    data.interfaces        = _safe_run(reg, "network.interfaces")
+    data.routing_table     = _safe_run(reg, "network.routing_table")
+    data.active_connections = _safe_run(reg, "network.active_connections")
+    data.listening_ports   = _safe_run(reg, "network.listening_ports")
+    data.dns_config        = _safe_run(reg, "network.dns_config")
+    data.vpn_detection     = _safe_run(reg, "network.vpn_detection")
+
+    if os_name == "macos":
+        data.bandwidth      = _safe_run(reg, "network.bandwidth_by_process")
+        data.firewall_status = _safe_run(reg, "network.firewall_status")
+        data.firewall_apps  = _safe_run(reg, "network.firewall_apps")
+        data.wifi_status    = _safe_run(reg, "network.wifi_status")
+        data.proxy_config   = _safe_run(reg, "network.proxy_config")
+
+    elif os_name == "linux":
+        data.bandwidth        = _safe_run(reg, "network.bandwidth_by_process")
+        data.firewall_status  = _safe_run(reg, "network.firewall_status_ufw")
+        data.firewall_iptables = _safe_run(reg, "network.firewall_status_iptables")
+
+    elif os_name == "windows":
+        data.bandwidth         = _safe_run(reg, "network.bandwidth_by_adapter")
+        data.firewall_status   = _safe_run(reg, "network.firewall_status")
+        data.firewall_rules    = _safe_run(reg, "network.firewall_rules_active")
+        data.connections_named = _safe_run(reg, "network.connections_with_process_names")
+
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Startup
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class StartupData:
+    os_name: str
+    user_items: str = ""
+    system_items: str = ""
+    running_items: str = ""
+    boot_time_summary: str = ""
+    boot_time_per_service: str = ""
+    # OS-specific
+    system_daemons: str = ""    # macOS
+    scheduled_tasks: str = ""   # Windows
+    auto_services: str = ""     # Windows
+
+
+def collect_startup(os_name: str) -> StartupData:
+    reg = CommandRegistry(os_name)
+    data = StartupData(os_name=os_name)
+
+    if os_name == "macos":
+        data.user_items    = _safe_run(reg, "startup.list_user_agents")
+        data.system_items  = _safe_run(reg, "startup.list_system_agents")
+        data.system_daemons = _safe_run(reg, "startup.list_system_daemons")
+        data.running_items = _safe_run(reg, "startup.list_running_noapple")
+
+    elif os_name == "linux":
+        data.user_items           = _safe_run(reg, "startup.list_user_autostart")
+        data.system_items         = _safe_run(reg, "startup.list_enabled_services")
+        data.running_items        = _safe_run(reg, "startup.list_running_services")
+        data.boot_time_summary    = _safe_run(reg, "startup.boot_time_summary")
+        data.boot_time_per_service = _safe_run(reg, "startup.boot_time_per_service")
+
+    elif os_name == "windows":
+        data.user_items       = _safe_run(reg, "startup.list_registry_run_user")
+        data.system_items     = _safe_run(reg, "startup.list_registry_run_system")
+        data.scheduled_tasks  = _safe_run(reg, "startup.list_scheduled_tasks")
+        data.auto_services    = _safe_run(reg, "startup.list_auto_services")
 
     return data

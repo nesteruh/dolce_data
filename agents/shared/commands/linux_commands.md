@@ -592,6 +592,252 @@
 
 ---
 
+## 🌐 NETWORK COMMANDS
+
+### CMD_ID: `network.interfaces`
+- **Purpose**: List all network interfaces with IP addresses
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ip addr show
+  ```
+
+---
+
+### CMD_ID: `network.routing_table`
+- **Purpose**: Show default gateway and routing table
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ip route show
+  ```
+
+---
+
+### CMD_ID: `network.active_connections`
+- **Purpose**: All listening and established connections with process names
+- **Risk**: NONE
+- **Requires**: nothing (`ss` is part of iproute2, available on all modern Linux)
+- **Command**:
+  ```
+  ss -tulnp
+  ```
+
+---
+
+### CMD_ID: `network.listening_ports`
+- **Purpose**: Only ports actively accepting incoming connections
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ss -tlnp
+  ```
+
+---
+
+### CMD_ID: `network.bandwidth_by_process`
+- **Purpose**: Per-process network bandwidth usage
+- **Risk**: NONE
+- **Requires**: `nethogs` (check availability first with `which nethogs`)
+- **Command**:
+  ```
+  which nethogs && sudo nethogs -t -c 5 2>/dev/null || cat /proc/net/dev
+  ```
+
+---
+
+### CMD_ID: `network.interface_stats`
+- **Purpose**: Bytes sent/received per interface (fallback bandwidth view)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  cat /proc/net/dev
+  ```
+
+---
+
+### CMD_ID: `network.dns_config`
+- **Purpose**: Show configured DNS servers
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  resolvectl status 2>/dev/null || cat /etc/resolv.conf
+  ```
+
+---
+
+### CMD_ID: `network.firewall_status_ufw`
+- **Purpose**: Check ufw firewall status and rules (Debian/Ubuntu)
+- **Risk**: NONE
+- **Requires**: `ufw` installed
+- **Command**:
+  ```
+  sudo ufw status verbose 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `network.firewall_status_iptables`
+- **Purpose**: Check iptables firewall rules (all distros)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  sudo iptables -L -n --line-numbers 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `network.vpn_detection`
+- **Purpose**: Detect active VPN tunnel interfaces (tun*, wg*, vpn*)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  ip addr show | grep -E "tun|wg|vpn|tap"
+  ```
+
+---
+
+### CMD_ID: `network.flush_dns`
+- **Purpose**: Clear the local DNS cache
+- **Risk**: LOW
+- **Requires**: explicit user confirmation
+- **Command**:
+  ```
+  sudo resolvectl flush-caches 2>/dev/null || sudo systemctl restart nscd 2>/dev/null
+  ```
+
+---
+
+## 🚀 STARTUP / SERVICE COMMANDS
+
+### CMD_ID: `startup.list_enabled_services`
+- **Purpose**: List all systemd services set to start automatically
+- **Risk**: NONE
+- **Requires**: systemd
+- **Command**:
+  ```
+  systemctl list-unit-files --type=service --state=enabled
+  ```
+
+---
+
+### CMD_ID: `startup.list_running_services`
+- **Purpose**: List all currently active (running) systemd services
+- **Risk**: NONE
+- **Requires**: systemd
+- **Command**:
+  ```
+  systemctl list-units --type=service --state=running
+  ```
+
+---
+
+### CMD_ID: `startup.list_user_autostart`
+- **Purpose**: List desktop-session autostart entries for the current user
+- **Risk**: NONE
+- **Requires**: nothing (XDG standard path)
+- **Command**:
+  ```
+  ls -la ~/.config/autostart/ 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `startup.list_user_services`
+- **Purpose**: List user-scope systemd services
+- **Risk**: NONE
+- **Requires**: systemd user session
+- **Command**:
+  ```
+  systemctl --user list-unit-files --type=service --state=enabled 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `startup.boot_time_summary`
+- **Purpose**: Total boot time breakdown
+- **Risk**: NONE
+- **Requires**: systemd
+- **Command**:
+  ```
+  systemd-analyze
+  ```
+
+---
+
+### CMD_ID: `startup.boot_time_per_service`
+- **Purpose**: Which services took the longest to start at boot
+- **Risk**: NONE
+- **Requires**: systemd
+- **Command**:
+  ```
+  systemd-analyze blame | head -20
+  ```
+
+---
+
+### CMD_ID: `startup.service_status`
+- **Purpose**: Check status of a specific service
+- **Risk**: NONE
+- **Requires**: service name parameter `<service>`
+- **Command**:
+  ```
+  systemctl status <service>
+  ```
+
+---
+
+### CMD_ID: `startup.disable_service`
+- **Purpose**: Prevent a service from starting at boot (does not stop it now)
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + service name `<service>`
+- **Command**:
+  ```
+  sudo systemctl disable <service>
+  ```
+
+---
+
+### CMD_ID: `startup.stop_and_disable_service`
+- **Purpose**: Stop a running service and disable it from starting at boot
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + service name `<service>`
+- **Command**:
+  ```
+  sudo systemctl disable --now <service>
+  ```
+
+---
+
+### CMD_ID: `startup.enable_service`
+- **Purpose**: Re-enable a previously disabled service to start at boot
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + service name `<service>`
+- **Command**:
+  ```
+  sudo systemctl enable <service>
+  ```
+
+---
+
+### CMD_ID: `startup.disable_user_autostart`
+- **Purpose**: Disable a desktop autostart entry by setting Hidden=true
+- **Risk**: MEDIUM
+- **Requires**: explicit user confirmation + desktop file name `<name>.desktop`
+- **Command**:
+  ```
+  echo "Hidden=true" >> ~/.config/autostart/<name>.desktop
+  ```
+
+---
+
 ## 🚫 FORBIDDEN COMMANDS (Linux)
 > These command IDs exist only to document what must NEVER be executed.
 > Agents must refuse any user request that maps to these.
