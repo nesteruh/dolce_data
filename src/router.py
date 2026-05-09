@@ -19,6 +19,7 @@ from src.agents import (
     run_health_agent,
     run_network_agent,
     run_startup_agent,
+    run_activity_agent,
 )
 from src.collectors import detect_os
 from src.judge import JudgedResult, run_judge
@@ -32,7 +33,7 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "storage": [
         "disk", "storage", "space", "free space", "gb", "tb", "cache",
         "temp", "large file", "download", "trash", "full", "clean", "wipe",
-        "no space", "running out", "file size",
+        "no space", "running out", "file size", "stale", "old file",
     ],
     "battery": [
         "battery", "charge", "drain", "power", "charging", "unplugged",
@@ -41,20 +42,29 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     ],
     "health": [
         "cpu", "gpu", "ram", "memory", "processor", "slow", "lag", "freeze",
-        "hang", "performance", "resource", "process", "activity", "swap",
+        "hang", "performance", "resource", "process", "swap",
         "fan", "hot", "thermal", "speed", "fast", "responsive",
     ],
     "network": [
         "network", "internet", "connection", "bandwidth", "wifi", "wi-fi",
         "ethernet", "firewall", "vpn", "dns", "port", "latency", "online",
         "downloading", "uploading", "ip address", "proxy", "slow internet",
-        "no internet", "connected", "packet", "ping",
+        "no internet", "connected", "packet", "ping", "slow connection",
+        "network slow", "internet slow",
     ],
     "startup": [
         "startup", "boot", "login", "login item", "autostart", "launch agent",
         "launch daemon", "background service", "service", "slow boot",
         "starts automatically", "runs on startup", "disable on startup",
         "startup program", "slow login",
+    ],
+    "activity": [
+        "recently opened", "recent files", "last opened", "what did i",
+        "what have i", "i've been", "my history", "file history",
+        "opened recently", "used recently", "command history", "shell history",
+        "apps i use", "frequently used", "usage history", "recent activity",
+        "what was i working on", "last week", "last month", "recently",
+        "what i opened", "have i used", "did i open", "what i've been",
     ],
 }
 
@@ -64,6 +74,7 @@ _AGENT_EMOJI: dict[str, str] = {
     "HealthAgent":  "💻",
     "NetworkAgent": "🌐",
     "StartupAgent": "🚀",
+    "ActivityAgent":"🔃",
 }
 
 
@@ -71,7 +82,7 @@ _AGENT_EMOJI: dict[str, str] = {
 # Multi-domain classifier
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _classify_domains(prompt: str) -> list[str]:
+def _classify(prompt: str) -> list[str]:
     """
     Return an ordered list of matched domains.
 
@@ -87,7 +98,7 @@ def _classify_domains(prompt: str) -> list[str]:
         for kw in keywords:
             if kw in lower:
                 scores[domain] += 1
-
+    
     matched = [d for d, s in scores.items() if s >= 1]
     if not matched:
         return ["health"]
@@ -168,7 +179,7 @@ def handle(
       5. Return JudgedResult wrapping AgentResult + JudgeVerdict
     """
     os_name = detect_os()
-    domains = _classify_domains(user_prompt)
+    domains = _classify(user_prompt)
 
     if verbose:
         tag = "Domain" if len(domains) == 1 else "Domains"

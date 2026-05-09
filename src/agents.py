@@ -9,6 +9,7 @@ Each agent:
 
 from __future__ import annotations
 
+import re
 import textwrap
 from dataclasses import dataclass
 
@@ -20,11 +21,13 @@ from src.collectors import (
     HealthData,
     NetworkData,
     StartupData,
+    UserActivityData,
     collect_storage,
     collect_battery,
     collect_health,
     collect_network,
     collect_startup,
+    collect_user_activity,
     detect_os,
 )
 
@@ -117,6 +120,20 @@ _STORAGE_SYSTEM = _SYSTEM_BASE + textwrap.dedent("""\
 """)
 
 
+def _parse_months(prompt: str) -> int:
+    """Extract a time period from the user prompt; default 6 months."""
+    p = prompt.lower()
+    m = re.search(r'(\d+)\s*(year|month|week)', p)
+    if not m:
+        return 6
+    n, unit = int(m.group(1)), m.group(2)
+    if unit == "year":
+        return n * 12
+    if unit == "week":
+        return max(1, round(n / 4))
+    return n
+
+
 def run_storage_agent(
     user_prompt: str,
     client: OpenAI,
@@ -124,7 +141,8 @@ def run_storage_agent(
     os_name: str | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
-    data: StorageData = collect_storage(os_name)
+    stale_months = _parse_months(user_prompt)
+    data: StorageData = collect_storage(os_name, stale_months=stale_months)
 
     # Format safe-to-delete items with real sizes (largest first)
     actionable = [
@@ -161,6 +179,9 @@ def run_storage_agent(
 
         === LARGE FILES IN DOWNLOADS (>50 MB — for manual review) ===
         {data.downloads_large or '(none found over 50 MB)'}
+
+        === STALE LARGE FILES (>50 MB, not modified in {stale_months}+ months) ===
+        {data.stale_files or '(none found)'}
     """)
 
     user_msg = textwrap.dedent(f"""\
@@ -173,8 +194,10 @@ def run_storage_agent(
         1. State how much space is actually free and how much can realistically be recovered.
            Be honest if the requested amount is not achievable.
         2. List items from "SAFE TO DELETE" ordered by size — include exact size and delete command for each.
-        3. If "LARGE FILES IN DOWNLOADS" has entries, mention the user should review those manually.
-        4. Note any Library areas that are unusually large (from the context section) but make clear
+        3. If "STALE LARGE FILES" has entries, list them by size — these are safe candidates for
+           manual deletion. Mention when each was last modified.
+        4. If "LARGE FILES IN DOWNLOADS" has entries, mention those for manual review.
+        5. Note any Library areas that are unusually large (from the context section) but make clear
            those require manual judgment before deleting.
     """)
 
@@ -513,6 +536,73 @@ def run_startup_agent(
 
     return AgentResult(
         agent="StartupAgent",
+        raw_data_summary=raw_summary,
+        analysis=llm_text,
+        suggestions=suggestions,
+        risk_levels=risks,
+        full_response=llm_text,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User Activity Agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ACTIVITY_SYSTEM = _SYSTEM_BASE + textwrap.dedent("""\
+
+    You are the ACTIVITY AGENT. You specialise in analysing user activity patterns:
+    recently opened files, frequently used applications, shell command history,
+    and login sessions. Help the user understand what they have been working on,
+    which tools they rely on most, and surface any patterns worth knowing
+    (e.g. apps opened rarely despite being on boot, or file types that dominate
+    recent work). Do NOT make assumptions about file contents — only reference
+    names and timestamps visible in the data.
+""")
+
+
+def run_activity_agent(
+    user_prompt: str,
+    client: OpenAI,
+    model: str,
+    os_name: str | None = None,
+) -> AgentResult:
+    os_name = os_name or detect_os()
+    data: UserActivityData = collect_user_activity(os_name)
+
+    raw_summary = textwrap.dedent(f"""\
+        OS: {os_name}
+
+        === RECENTLY OPENED FILES (newest first) ===
+        {data.recent_files or '(no data)'}
+
+        === FREQUENTLY USED APPS ===
+        {data.frequent_apps or '(no data)'}
+
+        === RECENT SHELL COMMANDS (last 30 unique) ===
+        {data.shell_history or '(no data)'}
+
+        === LOGIN SESSIONS ===
+        {data.last_logins or '(no data)'}
+    """)
+
+    user_msg = textwrap.dedent(f"""\
+        The user asked: "{user_prompt}"
+
+        Here is the current user activity data:
+        {raw_summary}
+
+        Respond in this order:
+        1. Summarise what the user has been working on recently based on file names and commands.
+        2. Identify the most-used apps or file types.
+        3. Flag anything unusual or worth the user's attention (e.g. rarely-used apps, repeated errors in commands).
+        4. Provide suggestions only if they are directly supported by the data shown above.
+    """)
+
+    llm_text = _llm_call(client, model, _ACTIVITY_SYSTEM, user_msg)
+    suggestions, risks = _parse_suggestions(llm_text)
+
+    return AgentResult(
+        agent="ActivityAgent",
         raw_data_summary=raw_summary,
         analysis=llm_text,
         suggestions=suggestions,

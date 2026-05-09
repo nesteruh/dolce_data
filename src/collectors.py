@@ -197,6 +197,7 @@ class StorageData:
     apt_cache: str = ""                                  # Linux only
     journal_logs: str = ""                               # Linux only
     safe_deletables: list = field(default_factory=list)  # list[SafeDeletableItem]
+    stale_files: str = ""                                # large files not modified in 6+ months
 
 
 _SKIP_DIR_SCAN = {"AppData", "Library", ".cache"}
@@ -286,20 +287,68 @@ def _downloads_large() -> str:
     return "\n".join(f"{_mb(sz):<14}{name}" for name, sz in big[:20])
 
 
-def collect_storage(os_name: str) -> StorageData:
+def _stale_large_files(min_size_mb: int = 50, months: int = 6) -> str:
+    """Find files larger than min_size_mb not modified in the last N months."""
+    cutoff = time.time() - months * 30.44 * 24 * 3600
+    min_size = min_size_mb * 1024 * 1024
+    results: list[tuple[str, int, float]] = []
+
+    def _scan(path: Path, depth: int) -> None:
+        if depth > 5:
+            return
+        try:
+            for entry in os.scandir(path):
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if depth == 0 and entry.name in _SKIP_DIR_SCAN:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        _scan(Path(entry.path), depth + 1)
+                    elif entry.is_file(follow_symlinks=False):
+                        st = entry.stat(follow_symlinks=False)
+                        if st.st_size >= min_size and st.st_mtime < cutoff:
+                            results.append((entry.path, st.st_size, st.st_mtime))
+                except (PermissionError, OSError):
+                    pass
+        except (PermissionError, OSError):
+            pass
+
+    _scan(Path.home(), 0)
+
+    if not results:
+        return f"(no files >{min_size_mb} MB untouched for {months}+ months)"
+
+    results.sort(key=lambda x: x[1], reverse=True)
+    lines = [f"{'Size':<12}{'Last Modified':<14}Path"]
+    for path, size, mtime in results[:25]:
+        dt = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        try:
+            short = str(Path(path).relative_to(Path.home()))
+        except ValueError:
+            short = path
+        lines.append(f"{_mb(size):<12}{dt:<14}{short[:70]}")
+
+    total = sum(r[1] for r in results)
+    lines.append(f"\nTotal: {_mb(total)} across {len(results)} files")
+    return "\n".join(lines)
+
+
+def collect_storage(os_name: str, stale_months: int = 6) -> StorageData:
     data = StorageData(os_name=os_name)
 
-    with ThreadPoolExecutor(max_workers=7) as ex:
-        fv   = ex.submit(_volumes)
-        fd   = ex.submit(_largest_dirs)
-        ft   = ex.submit(_trash_size, os_name)
-        f_sd = ex.submit(collect_safe_deletables, os_name)
-        flib = ex.submit(_library_breakdown) if os_name == "macos" else None
-        fdl  = ex.submit(_downloads_large)   if os_name == "macos" else None
-        fapt = ex.submit(
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        fv     = ex.submit(_volumes)
+        fd     = ex.submit(_largest_dirs)
+        ft     = ex.submit(_trash_size, os_name)
+        f_sd   = ex.submit(collect_safe_deletables, os_name)
+        f_stale = ex.submit(_stale_large_files, 50, stale_months)
+        flib   = ex.submit(_library_breakdown) if os_name == "macos" else None
+        fdl    = ex.submit(_downloads_large)   if os_name == "macos" else None
+        fapt   = ex.submit(
             lambda: _mb(_dir_size(Path("/var/cache/apt/archives")))
         ) if os_name == "linux" else None
-        fjnl = ex.submit(
+        fjnl   = ex.submit(
             lambda: _mb(_dir_size(Path("/var/log/journal")))
         ) if os_name == "linux" else None
 
@@ -307,6 +356,7 @@ def collect_storage(os_name: str) -> StorageData:
         data.largest_dirs    = fd.result()
         data.trash_size      = ft.result()
         data.safe_deletables = f_sd.result()
+        data.stale_files     = f_stale.result()
 
         if flib:
             data.library_breakdown = flib.result()
@@ -990,5 +1040,160 @@ def collect_startup(os_name: str) -> StartupData:
             data.system_items    = f_rs.result()
             data.scheduled_tasks = f_st.result()
             data.auto_services   = f_sv.result()
+
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User Activity
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class UserActivityData:
+    os_name: str
+    recent_files: str = ""    # recently opened files with timestamps
+    frequent_apps: str = ""   # apps used most often
+    shell_history: str = ""   # last N unique shell commands
+    last_logins: str = ""     # recent login/session events
+
+
+def _recent_files_windows() -> str:
+    return _ps(
+        "$sh = New-Object -ComObject WScript.Shell; "
+        "Get-ChildItem \"$env:APPDATA\\Microsoft\\Windows\\Recent\" -Filter *.lnk "
+        "| Sort-Object LastWriteTime -Descending | Select-Object -First 30 "
+        "| ForEach-Object { "
+        "  try { $t = $sh.CreateShortcut($_.FullName).TargetPath } "
+        "  catch { $t = $_.BaseName }; "
+        "  \"$($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))  $t\" "
+        "} | Out-String"
+    )
+
+
+def _recent_files_macos() -> str:
+    return _sh([
+        "mdfind", "-onlyin", str(Path.home()),
+        "kMDItemLastUsedDate >= $time.now(-30d)",
+        "-attr", "kMDItemPath,kMDItemLastUsedDate",
+    ])
+
+
+def _recent_files_linux() -> str:
+    xbel = Path.home() / ".recently-used.xbel"
+    if not xbel.exists():
+        return "(~/.recently-used.xbel not found)"
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.parse(xbel).getroot()
+        bookmarks = []
+        for bm in root.findall("bookmark"):
+            href = bm.get("href", "")
+            visited = bm.get("visited") or bm.get("modified") or ""
+            if href.startswith("file://"):
+                bookmarks.append((visited, href[7:]))
+        bookmarks.sort(reverse=True)
+        lines = [f"{'Last Used':<22}Path"]
+        for visited, path in bookmarks[:25]:
+            lines.append(f"{visited[:19]:<22}{path[:70]}")
+        return "\n".join(lines) if len(lines) > 1 else "(no recent files)"
+    except Exception as exc:
+        return f"(error parsing recent files: {exc})"
+
+
+def _shell_history() -> str:
+    candidates = [
+        Path.home() / ".zsh_history",
+        Path.home() / ".bash_history",
+        Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt",
+    ]
+    for path in candidates:
+        if path.exists():
+            try:
+                raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                # strip zsh extended-history timestamps (lines starting with ': ')
+                cmds = [l for l in raw if l.strip() and not l.startswith(": ")]
+                seen: set[str] = set()
+                unique: list[str] = []
+                for cmd in reversed(cmds):
+                    if cmd not in seen:
+                        seen.add(cmd)
+                        unique.append(cmd)
+                    if len(unique) >= 30:
+                        break
+                return "\n".join(reversed(unique))
+            except OSError:
+                pass
+    return "(no shell history found)"
+
+
+def _frequent_apps_windows() -> str:
+    return _ps(
+        "(Get-ChildItem \"$env:APPDATA\\Microsoft\\Windows\\Recent\\AutomaticDestinations\" "
+        "| Sort-Object LastWriteTime -Descending | Select-Object -First 20 "
+        "| Select-Object BaseName,LastWriteTime "
+        "| Format-Table -AutoSize | Out-String).Trim()"
+    )
+
+
+def _frequent_apps_macos() -> str:
+    return _sh(["mdfind",
+                "kMDItemLastUsedDate >= $time.now(-30d) && kMDItemContentTypeTree == 'com.apple.application-bundle'",
+                "-attr", "kMDItemDisplayName,kMDItemLastUsedDate"])
+
+
+def _frequent_apps_linux() -> str:
+    desktop_dirs = [
+        Path("/usr/share/applications"),
+        Path.home() / ".local/share/applications",
+    ]
+    apps = []
+    for d in desktop_dirs:
+        if d.exists():
+            for f in d.glob("*.desktop"):
+                try:
+                    st = f.stat()
+                    apps.append((f.stem, st.st_mtime))
+                except OSError:
+                    pass
+    if not apps:
+        return "(no .desktop app files found)"
+    apps.sort(key=lambda x: x[1], reverse=True)
+    return "\n".join(f"{name}" for name, _ in apps[:20])
+
+
+def _last_logins(os_name: str) -> str:
+    if os_name == "windows":
+        return _ps(
+            "(Get-LocalUser | Where-Object {$_.LastLogon} "
+            "| Select-Object Name,LastLogon | Sort-Object LastLogon -Descending "
+            "| Format-Table -AutoSize | Out-String).Trim()"
+        )
+    return _sh(["last", "-n", "10"])
+
+
+def collect_user_activity(os_name: str) -> UserActivityData:
+    data = UserActivityData(os_name=os_name)
+
+    _recent_fn = (
+        _recent_files_windows if os_name == "windows" else
+        _recent_files_macos   if os_name == "macos"   else
+        _recent_files_linux
+    )
+    _apps_fn = (
+        _frequent_apps_windows if os_name == "windows" else
+        _frequent_apps_macos   if os_name == "macos"   else
+        _frequent_apps_linux
+    )
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_recent = ex.submit(_recent_fn)
+        f_apps   = ex.submit(_apps_fn)
+        f_shell  = ex.submit(_shell_history)
+        f_logins = ex.submit(_last_logins, os_name)
+
+        data.recent_files  = f_recent.result()
+        data.frequent_apps = f_apps.result()
+        data.shell_history = f_shell.result()
+        data.last_logins   = f_logins.result()
 
     return data
