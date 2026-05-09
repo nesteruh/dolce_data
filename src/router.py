@@ -8,6 +8,7 @@ relevant agents run in parallel and their results are merged into one response.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 from openai import OpenAI
 
@@ -20,6 +21,7 @@ from src.agents import (
     run_startup_agent,
 )
 from src.collectors import detect_os
+from src.judge import JudgedResult, run_judge
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,15 +156,16 @@ def handle(
     user_prompt: str,
     client: OpenAI,
     model: str = "llama3.2",
+    judge_model: str | None = None,
     verbose: bool = False,
-) -> AgentResult:
+) -> JudgedResult:
     """
     Main pipeline:
       1. Detect OS
-      2. Classify prompt → one or more domains
-      3. Run matched specialist agents (in parallel for multi-domain)
-      4. Merge into a single AgentResult
-      5. Return AgentResult (caller uses .full_response and .raw_data_summary)
+      2. Classify prompt → domain
+      3. Run specialist agent (collects data + LLM analysis + formatting)
+      4. Run judge layer (parallel per-suggestion evaluation + holistic check)
+      5. Return JudgedResult wrapping AgentResult + JudgeVerdict
     """
     os_name = detect_os()
     domains = _classify_domains(user_prompt)
@@ -233,4 +236,11 @@ def handle(
             full_response=merged.full_response + note,
         )
 
-    return merged
+    _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)
+    judged = run_judge(result, user_prompt, domain, client, _judge_model)
+
+    if verbose:
+        blocked = [v for v in judged.verdict.verdicts if not v.approved]
+        print(f"[Judge] {len(blocked)} suggestion(s) blocked. Model: {_judge_model}\n")
+
+    return judged
