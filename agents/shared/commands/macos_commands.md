@@ -101,13 +101,24 @@ Each entry follows this structure:
 
 ---
 
-### CMD_ID: `storage.downloads_old`
-- **Purpose**: List files in ~/Downloads not modified in the last 30 days
+### CMD_ID: `storage.downloads_large`
+- **Purpose**: Files larger than 50 MB in Downloads with their sizes, sorted largest first
 - **Risk**: NONE
 - **Requires**: nothing
 - **Command**:
   ```
-  find ~/Downloads -mtime +30 -type f 2>/dev/null
+  find ~/Downloads -maxdepth 2 -type f -size +50M -exec du -sh {} + 2>/dev/null | sort -rh | head -15
+  ```
+
+---
+
+### CMD_ID: `storage.area_breakdown`
+- **Purpose**: Sizes of the main Library subdirectories that consume the most space
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh ~/Library/Caches ~/Library/Application\ Support ~/Library/Containers ~/Library/Developer ~/Library/Logs ~/Applications 2>/dev/null | sort -rh
   ```
 
 ---
@@ -163,6 +174,17 @@ Each entry follows this structure:
 - **Command**:
   ```
   du -sh ~/Library/Developer/Xcode/Archives 2>/dev/null
+  ```
+
+---
+
+### CMD_ID: `storage.path_size`
+- **Purpose**: Get the disk usage of a specific path (used for safe-deletables catalogue)
+- **Risk**: NONE
+- **Requires**: nothing
+- **Command**:
+  ```
+  du -sh "<path>"
   ```
 
 ---

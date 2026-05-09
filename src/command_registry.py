@@ -253,11 +253,14 @@ def _shell_run(command: str, timeout: int = 15) -> str:
             shell=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
-        output = result.stdout.strip()
+        output = result.stdout.strip().encode("utf-8", errors="replace").decode("utf-8")
         if result.returncode != 0 and not output:
-            return f"ERROR: {result.stderr.strip() or 'command exited with code ' + str(result.returncode)}"
+            stderr = result.stderr.strip().encode("utf-8", errors="replace").decode("utf-8")
+            return f"ERROR: {stderr or 'command exited with code ' + str(result.returncode)}"
         return output
     except subprocess.TimeoutExpired:
         return f"ERROR: command timed out after {timeout}s"

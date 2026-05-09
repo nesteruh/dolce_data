@@ -58,6 +58,12 @@ _SYSTEM_BASE = textwrap.dedent("""\
     you explain it in plain language immediately after.
     NEVER suggest deleting system files, disabling security features, or any
     action that could destabilise the OS.
+
+    CRITICAL: Base your entire response STRICTLY on the system data provided.
+    Only mention specific file names, folder names, process names, project names,
+    or sizes that appear VERBATIM in the data below. NEVER invent examples,
+    placeholder names (like "Project A"), or sizes that are not in the data.
+    If a section says "(no data)" or is empty, acknowledge that and skip it.
 """)
 
 
@@ -97,8 +103,12 @@ def _parse_suggestions(text: str) -> tuple[list[str], list[str]]:
 _STORAGE_SYSTEM = _SYSTEM_BASE + textwrap.dedent("""\
 
     You are the STORAGE AGENT. You specialise in disk space, caches, large files,
-    and cleanup opportunities. Help the user understand their storage situation
-    and what they can safely free up.
+    and cleanup opportunities.
+
+    RULE: When suggesting what to delete, you MUST ONLY reference items that
+    appear in the "SAFE TO DELETE" section of the data. Every suggestion must
+    include the exact size shown and the delete command provided. Never invent
+    paths, project names, or sizes. If a path shows "not found" or "0B", skip it.
 """)
 
 
@@ -111,27 +121,41 @@ def run_storage_agent(
     os_name = os_name or detect_os()
     data: StorageData = collect_storage(os_name)
 
+    # Format safe-to-delete items with real sizes (largest first)
+    actionable = [
+        item for item in data.safe_deletables
+        if item.exists and item.size not in ("not found", "error", "timeout", "0B")
+    ]
+    if actionable:
+        safe_lines = "\n".join(
+            f"  • {item.description} ({item.path}): {item.size}  →  {item.delete_cmd}"
+            for item in actionable
+        )
+        total_label = f"\n  Total recoverable: see sizes above"
+    else:
+        safe_lines = "  (no cleanable items found)"
+        total_label = ""
+
     raw_summary = textwrap.dedent(f"""\
         OS: {os_name}
 
         === DISK VOLUMES ===
         {data.volumes or '(no data)'}
 
-        === LARGEST DIRECTORIES IN HOME ===
+        === LIBRARY & APP AREAS (context only — do NOT suggest deleting these wholesale) ===
+        {data.library_breakdown or '(no data)'}
+
+        === LARGEST HOME DIRECTORIES ===
         {data.largest_dirs or '(no data)'}
 
-        === CACHE SIZES ===
-        {data.cache_size or '(no data)'}
-        {data.cache_breakdown or ''}
+        === SAFE TO DELETE (real sizes — suggest ONLY from this list) ===
+{safe_lines}{total_label}
 
-        === TRASH SIZE ===
+        === TRASH ===
         {data.trash_size or '(no data)'}
 
-        === DOWNLOADS OLDER THAN 30 DAYS ===
-        {data.downloads_old or '(none found)'}
-
-        === XCODE DERIVED DATA ===
-        {data.xcode_derived or '(no data / Xcode not installed)'}
+        === LARGE FILES IN DOWNLOADS (>50 MB — for manual review) ===
+        {data.downloads_large or '(none found over 50 MB)'}
     """)
 
     user_msg = textwrap.dedent(f"""\
@@ -140,8 +164,13 @@ def run_storage_agent(
         Here is the current system storage data:
         {raw_summary}
 
-        Analyse this data, explain the storage situation, identify what is using
-        the most space, and provide specific suggestions.
+        Respond in this order:
+        1. State how much space is actually free and how much can realistically be recovered.
+           Be honest if the requested amount is not achievable.
+        2. List items from "SAFE TO DELETE" ordered by size — include exact size and delete command for each.
+        3. If "LARGE FILES IN DOWNLOADS" has entries, mention the user should review those manually.
+        4. Note any Library areas that are unusually large (from the context section) but make clear
+           those require manual judgment before deleting.
     """)
 
     llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg)
