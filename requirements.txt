@@ -2,3 +2,8 @@ openai
 python-dotenv
 psutil
 rich
+chromadb
+ollama
+markitdown
+PyMuPDF
+python-docx
