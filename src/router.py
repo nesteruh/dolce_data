@@ -58,13 +58,13 @@ def handle(
     client: OpenAI,
     model: str = "llama3.2",
     verbose: bool = False,
-) -> str:
+) -> AgentResult:
     """
     Main pipeline:
       1. Detect OS
       2. Classify prompt → domain
       3. Run specialist agent (collects data + LLM analysis + formatting)
-      4. Return the final answer string
+      4. Return the AgentResult (raw data + LLM analysis)
     """
     os_name = detect_os()
     domain = _classify(user_prompt)
@@ -83,4 +83,4 @@ def handle(
         print(f"[{result.agent}] Raw data collected.")
         print(f"[{result.agent}] Suggestions found: {len(result.suggestions)}\n")
 
-    return result.full_response
+    return result
