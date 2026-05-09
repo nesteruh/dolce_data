@@ -40,6 +40,9 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "cpu", "gpu", "ram", "memory", "processor", "slow", "lag", "freeze",
         "hang", "performance", "resource", "process", "activity", "swap",
         "fan", "hot", "thermal", "speed", "fast", "responsive",
+        "health", "report", "overview", "status", "summary", "diagnostic",
+        "check", "analyse", "analyze", "performance report", "system report",
+        "suggestions", "suggestion", "improve", "optimise", "optimize",
     ],
     "network": [
         "network", "internet", "connection", "bandwidth", "wifi", "wi-fi",
@@ -58,8 +61,8 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
 
 def _classify(prompt: str) -> str:
     """
-    Return 'storage', 'battery', or 'health' based on keyword overlap.
-    Defaults to 'health' if ambiguous.
+    Return the best-matching domain (storage/battery/health/network/startup).
+    Defaults to 'health' if no keywords match.
     """
     lower = prompt.lower()
     scores = {domain: 0 for domain in _DOMAIN_KEYWORDS}
@@ -84,6 +87,7 @@ def handle(
     model: str = "llama3.2",
     judge_model: str | None = None,
     verbose: bool = False,
+    history: list[dict] | None = None,
 ) -> JudgedResult:
     """
     Main pipeline:
@@ -106,14 +110,14 @@ def handle(
         "network": run_network_agent,
         "startup": run_startup_agent,
     }
-    result: AgentResult = dispatch[domain](user_prompt, client, model, os_name)
+    result: AgentResult = dispatch[domain](user_prompt, client, model, os_name, history)
 
     if verbose:
         print(f"[{result.agent}] Raw data collected.")
         print(f"[{result.agent}] Suggestions found: {len(result.suggestions)}\n")
 
     _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)
-    judged = run_judge(result, user_prompt, domain, client, _judge_model)
+    judged = run_judge(result, user_prompt, domain, client, _judge_model, history=history)
 
     if verbose:
         blocked = [v for v in judged.verdict.verdicts if not v.approved]

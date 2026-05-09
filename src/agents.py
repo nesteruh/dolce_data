@@ -62,7 +62,18 @@ _SYSTEM_BASE = textwrap.dedent("""\
         3. Numbered suggestions — most impactful first, each on its own line:
            SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <specific action>
         4. One short closing sentence.
-      Keep under 300 words.
+    • Suggestion / overview question ("what are your suggestions?", "give me a report",
+      "what should I do about X?", "how is my X?", "what is wrong with my X?",
+      "what can I improve?"):
+      Produce a STRUCTURED MINI-REPORT with at MINIMUM 3 suggestions (aim for 5):
+        1. Executive summary: 2-3 sentences on the overall state of this domain.
+        2. Findings: for EACH significant data point in the system data, one sentence
+           naming the value and what it means.
+        3. Numbered suggestions — at LEAST 3, ordered by impact:
+           SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <specific action>
+           Each suggestion MUST include: what to do, the exact value/name from data,
+           and why it matters. Never repeat the same suggestion.
+        4. One closing sentence on expected benefit if suggestions are followed.
 
     NEVER suggest deleting system files, disabling security features, or any
     action that could destabilise the OS.
@@ -79,7 +90,7 @@ _JSON_FORMAT = textwrap.dedent("""\
     You MUST respond with ONLY valid JSON — no prose, no markdown, no code fences.
     Use exactly this schema:
     {
-      "analysis": "<1-3 sentence summary of your diagnosis>",
+      "analysis": "<summary of your diagnosis — 2-3 sentences for overview questions, 1-2 for specific questions>",
       "suggestions": [
         {
           "text": "<specific, actionable step the user should take>",
@@ -88,19 +99,27 @@ _JSON_FORMAT = textwrap.dedent("""\
         }
       ]
     }
-    For simple status questions, return an empty suggestions array.
+    For simple status questions ("what is X?"), return an empty suggestions array.
+    For suggestion/overview questions, you MUST return at LEAST 3 suggestions — aim for 5.
     CRITICAL: Only include file names, sizes, process names, and paths that appear
     VERBATIM in the system data above. Never invent values.
 """)
 
 
-def _llm_call(client: OpenAI, model: str, system: str, user: str) -> str:
+def _llm_call(
+    client: OpenAI,
+    model: str,
+    system: str,
+    user: str,
+    history: list[dict] | None = None,
+) -> str:
+    messages: list[dict] = [{"role": "system", "content": system}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user})
     response = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
         temperature=0.1,
         response_format={"type": "json_object"},
     )
@@ -163,6 +182,7 @@ def run_storage_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: StorageData = collect_storage(os_name)
@@ -219,7 +239,7 @@ def run_storage_agent(
            those require manual judgment before deleting.
     """)
 
-    llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg)
+    llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
 
@@ -260,6 +280,7 @@ def run_battery_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: BatteryData = collect_battery(os_name)
@@ -297,7 +318,7 @@ def run_battery_agent(
         Answer the user's specific question using only the data above.
     """)
 
-    llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg)
+    llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
 
@@ -330,6 +351,7 @@ def run_health_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: HealthData = collect_health(os_name)
@@ -373,7 +395,7 @@ def run_health_agent(
         Answer the user's specific question using only the data above.
     """)
 
-    llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg)
+    llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
 
@@ -413,6 +435,7 @@ def run_network_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: NetworkData = collect_network(os_name)
@@ -468,7 +491,7 @@ def run_network_agent(
         suggestions. Use the SUGGESTION format for each action.
     """)
 
-    llm_text = _llm_call(client, model, _NETWORK_SYSTEM, user_msg)
+    llm_text = _llm_call(client, model, _NETWORK_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
 
@@ -508,6 +531,7 @@ def run_startup_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: StartupData = collect_startup(os_name)
@@ -550,7 +574,7 @@ def run_startup_agent(
         Give specific, safe suggestions. Use the SUGGESTION format for each action.
     """)
 
-    llm_text = _llm_call(client, model, _STARTUP_SYSTEM, user_msg)
+    llm_text = _llm_call(client, model, _STARTUP_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
 
