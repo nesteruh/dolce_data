@@ -118,17 +118,33 @@ _AGENT_EMOJI: dict[str, str] = {
 # Fast-report detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Multi-word phrases that clearly signal a general system overview (not a specific domain question)
 _OVERVIEW_KEYWORDS = frozenset({
-    "report", "overview", "brief report", "health report", "check",
-    "situation", "status", "summary", "how is my", "how is the",
-    "what is the health", "system health", "current state",
-    "analyse", "analyze", "give me a report", "current health",
-    "brief", "overall", "what's going on", "what is going on",
+    "general report", "health report", "brief report", "system report", "full report",
+    "system health", "overall health", "health of computer", "health of my computer",
+    "how is my computer", "how is the computer", "computer health",
+    "current health", "health status", "general health", "system summary",
+    "system overview", "overall status", "give me a report", "create a report",
+    "show me a report", "explain health", "explain the health",
+})
+
+# If any of these appear the query is domain-specific — never use the fast path
+_SPECIFIC_DOMAIN_WORDS = frozenset({
+    "network", "wifi", "wi-fi", "internet", "connection", "bandwidth",
+    "vpn", "dns", "firewall", "port", "latency", "ping",
+    "battery", "charge", "drain", "power", "energy",
+    "disk", "storage", "space", "files", "download", "trash",
+    "startup", "boot", "login", "launch",
+    "activity", "recent", "history", "opened",
+    "cpu", "gpu", "ram", "memory", "processor",
 })
 
 
 def _is_overview_query(prompt: str) -> bool:
     p = prompt.lower()
+    # Never override routing for domain-specific questions
+    if any(word in p for word in _SPECIFIC_DOMAIN_WORDS):
+        return False
     return any(kw in p for kw in _OVERVIEW_KEYWORDS)
 
 

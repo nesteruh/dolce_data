@@ -26,14 +26,12 @@ from src.collectors import (
     NetworkData,
     StartupData,
     UserActivityData,
-    FileContextData,
     collect_storage,
     collect_battery,
     collect_health,
     collect_network,
     collect_startup,
     collect_user_activity,
-    collect_file_context,
     detect_os,
 )
 
@@ -378,6 +376,7 @@ def run_fast_report(
     bat_pct, bat_charging = _parse_battery_status(battery.quick_status or "")
     uptime_h     = _parse_uptime_hours(health.uptime or "")
 
+
     # ── Overall health score (10 = perfect, 0 = maxed out) ──────────────────
     try:
         load1 = float((health.load_avg or "0").split("/")[0].split("(")[0].strip())
@@ -398,7 +397,7 @@ def run_fast_report(
     lines.append("---")
 
     # ── CPU ──────────────────────────────────────────────────────────────────
-    load_display = (health.load_avg or "—").split("(")[0].strip()
+    load_display = d.load_avg_str or "—"
     lines.append(f"\n### CPU  ·  Load: {load_display}\n")
     lines.append("| Impact | Process | CPU% | Risk |")
     lines.append("|--------|---------|------|------|")
@@ -477,7 +476,7 @@ def run_fast_report(
     return AgentResult(
         agent="FastReport",
         raw_data_summary=(
-            f"Fast report — collected health + battery + storage in parallel\n"
+            f"Fast report — psutil only, no shell commands\n"
             f"CPU processes: {len(cpu_procs)}  RAM processes: {len(ram_procs)}  "
             f"Battery: {f'{bat_pct:.0f}%' if bat_pct is not None else 'N/A'}  "
             f"Disk: {f'{disk_info[2]:.1f}%' if disk_info else 'N/A'}"
