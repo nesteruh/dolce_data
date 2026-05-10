@@ -323,7 +323,9 @@ def main() -> None:
                 judge_model=JUDGE_MODEL, verbose=False,
                 history=conversation_history[-_MAX_HISTORY_TURNS:] or None,
             )
-            _show_raw_data(result.agent_result.raw_data_summary, result.agent_result.agent)
+            is_fast = result.agent_result.agent == "FastReport"
+            if not is_fast:
+                _show_raw_data(result.agent_result.raw_data_summary, result.agent_result.agent)
             if result.is_answer_blocked:
                 _show_blocked_answer(result)
             else:
@@ -331,7 +333,19 @@ def main() -> None:
                 # Only record successful (non-blocked) turns in session memory
                 conversation_history.append({"role": "user", "content": user_input})
                 conversation_history.append({"role": "assistant", "content": result.agent_result.analysis})
-            _show_judge_verdict(result)
+            if is_fast:
+                if _RICH:
+                    console.print(Panel(
+                        "[dim]No LLM was used — report is built directly from live system data.\n"
+                        "Judge evaluation is skipped because there is no AI-generated text to audit.[/dim]",
+                        title="[bold blue]Fast Report Mode[/bold blue]",
+                        border_style="blue",
+                        padding=(0, 2),
+                    ))
+                else:
+                    print("[ Fast Report Mode — no LLM, no judge ]")
+            else:
+                _show_judge_verdict(result)
             from src.history import save_entry
             save_entry(user_input, result)
         except Exception as exc:

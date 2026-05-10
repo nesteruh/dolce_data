@@ -20,6 +20,7 @@ from src.agents import (
     run_network_agent,
     run_startup_agent,
     run_activity_agent,
+    run_fast_report,
 )
 from src.collectors import detect_os
 from src.judge import JudgedResult, run_judge
@@ -81,6 +82,24 @@ _AGENT_EMOJI: dict[str, str] = {
     "StartupAgent": "🚀",
     "ActivityAgent":"🔃",
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fast-report detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OVERVIEW_KEYWORDS = frozenset({
+    "report", "overview", "brief report", "health report", "check",
+    "situation", "status", "summary", "how is my", "how is the",
+    "what is the health", "system health", "current state",
+    "analyse", "analyze", "give me a report", "current health",
+    "brief", "overall", "what's going on", "what is going on",
+})
+
+
+def _is_overview_query(prompt: str) -> bool:
+    p = prompt.lower()
+    return any(kw in p for kw in _OVERVIEW_KEYWORDS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +200,19 @@ def handle(
       5. Return JudgedResult wrapping AgentResult + JudgeVerdict
     """
     os_name = detect_os()
+
+    # ── Fast path: overview/report queries skip LLM entirely ────────────────
+    if _is_overview_query(user_prompt):
+        from src.judge import JudgeVerdict
+        result = run_fast_report(user_prompt, client, model, os_name, history)
+        verdict = JudgeVerdict(
+            verdicts=[],
+            judge_model=judge_model or model,
+            judge_failed=True,
+            failure_reason="fast-report-mode",
+        )
+        return JudgedResult(agent_result=result, verdict=verdict, domain="health+battery+storage")
+
     domains = _classify(user_prompt)
 
     if verbose:
