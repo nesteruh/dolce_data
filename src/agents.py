@@ -24,12 +24,14 @@ from src.collectors import (
     NetworkData,
     StartupData,
     UserActivityData,
+    FastReportData,
     collect_storage,
     collect_battery,
     collect_health,
     collect_network,
     collect_startup,
     collect_user_activity,
+    collect_fast_report_data,
     detect_os,
 )
 
@@ -308,31 +310,24 @@ def run_fast_report(
     """
     os_name = os_name or detect_os()
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        f_h = ex.submit(collect_health,  os_name)
-        f_b = ex.submit(collect_battery, os_name)
-        f_s = ex.submit(collect_storage, os_name)
+    # Single lightweight collector — psutil only, no shell commands, ~1 s total
+    d: FastReportData = collect_fast_report_data()
 
-    health  = f_h.result()
-    battery = f_b.result()
-    storage = f_s.result()
-
-    cpu_procs    = _parse_cpu_table(health.top_cpu_procs    or "")
-    ram_procs    = _parse_ram_table(health.top_mem_procs    or "")
-    energy_procs = _parse_energy_table(battery.energy_consumers or "")
-    ram_used, ram_total, ram_pct, swap_pct = _parse_memory_overview(health.memory_overview or "")
+    cpu_procs    = d.top_cpu
+    ram_procs    = d.top_ram
+    energy_procs = d.top_cpu   # reuse CPU list as energy-consumer proxy
+    ram_used     = d.ram_used_gb
+    ram_total    = d.ram_total_gb
+    ram_pct      = d.ram_pct
+    swap_pct     = d.swap_pct
     total_ram_mb = ram_total * 1024
-    disk_info    = _parse_disk_usage(storage.volumes or "")
-    bat_pct, bat_charging = _parse_battery_status(battery.quick_status or "")
-    uptime_h     = _parse_uptime_hours(health.uptime or "")
+    bat_pct      = d.bat_pct
+    bat_charging = d.bat_charging
+    uptime_h     = d.uptime_h
+    disk_info    = (d.disk_used_gb, d.disk_total_gb, d.disk_pct) if d.disk_total_gb else None
 
     # ── Overall health score (10 = perfect, 0 = maxed out) ──────────────────
-    try:
-        load1 = float((health.load_avg or "0").split("/")[0].split("(")[0].strip())
-        cores = int((health.core_count or "1").split()[0])
-        load_score = min(10.0, (load1 / max(1, cores)) * 10)
-    except (ValueError, IndexError):
-        load_score = 0.0
+    load_score = min(10.0, (d.load1 / max(1, d.cpu_cores)) * 10)
     stress = (load_score + ram_pct / 10.0 + swap_pct / 10.0) / 3.0
     health_score = round(max(0.0, 10.0 - stress), 1)
     health_label = "GOOD" if health_score >= 7 else ("MODERATE" if health_score >= 4 else "POOR")
@@ -346,7 +341,7 @@ def run_fast_report(
     lines.append("---")
 
     # ── CPU ──────────────────────────────────────────────────────────────────
-    load_display = (health.load_avg or "—").split("(")[0].strip()
+    load_display = d.load_avg_str or "—"
     lines.append(f"\n### CPU  ·  Load: {load_display}\n")
     lines.append("| Impact | Process | CPU% | Risk |")
     lines.append("|--------|---------|------|------|")
@@ -425,7 +420,7 @@ def run_fast_report(
     return AgentResult(
         agent="FastReport",
         raw_data_summary=(
-            f"Fast report — collected health + battery + storage in parallel\n"
+            f"Fast report — psutil only, no shell commands\n"
             f"CPU processes: {len(cpu_procs)}  RAM processes: {len(ram_procs)}  "
             f"Battery: {f'{bat_pct:.0f}%' if bat_pct is not None else 'N/A'}  "
             f"Disk: {f'{disk_info[2]:.1f}%' if disk_info else 'N/A'}"
