@@ -15,14 +15,15 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.judge import JudgedResult
+# from src.judge import JudgedResult  # JUDGE DISABLED
+from src.agents import AgentResult
 
 DEFAULT_HISTORY_FILE = "logs/history.jsonl"
 
 
 def save_entry(
     user_prompt: str,
-    judged: JudgedResult,
+    judged: AgentResult,  # JUDGE DISABLED: was JudgedResult
     history_file: str | None = None,
 ) -> None:
     """
@@ -35,9 +36,9 @@ def save_entry(
         pass
 
 
-def _write_entry(user_prompt: str, judged: JudgedResult, path: str) -> None:
-    ar = judged.agent_result
-    verdict = judged.verdict
+def _write_entry(user_prompt: str, judged: AgentResult, path: str) -> None:  # JUDGE DISABLED: was JudgedResult
+    ar = judged  # JUDGE DISABLED: was judged.agent_result
+    # verdict = judged.verdict  # JUDGE DISABLED
 
     # Extract OS name from the first "OS: ..." line in raw_data_summary
     os_name = "unknown"
@@ -49,7 +50,8 @@ def _write_entry(user_prompt: str, judged: JudgedResult, path: str) -> None:
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "question": user_prompt,
-        "domain": judged.domain,
+        # "domain": judged.domain,  # JUDGE DISABLED
+        "domain": "",
         "agent": ar.agent,
         "os": os_name,
         "assistant": {
@@ -59,28 +61,29 @@ def _write_entry(user_prompt: str, judged: JudgedResult, path: str) -> None:
                 for text, risk in zip(ar.suggestions, ar.risk_levels)
             ],
         },
-        "judge": {
-            "model": verdict.judge_model,
-            "overall_quality": verdict.overall_quality,
-            "quality_note": verdict.quality_note,
-            "router_domain_correct": verdict.router_domain_correct,
-            "router_note": verdict.router_note,
-            "response_relevant": verdict.response_relevant,
-            "relevance_note": verdict.relevance_note,
-            "blocked_count": sum(1 for v in verdict.verdicts if not v.approved),
-            "suggestions": [
-                {
-                    "text": ar.suggestions[v.index],
-                    "original_risk": ar.risk_levels[v.index],
-                    "approved": v.approved,
-                    "adjusted_risk": v.adjusted_risk,
-                    "block_reason": v.block_reason,
-                    "factual": v.factual,
-                    "factuality_note": v.factuality_note,
-                }
-                for v in verdict.verdicts
-            ],
-        },
+        # JUDGE DISABLED — verdict block commented out
+        # "judge": {
+        #     "model": verdict.judge_model,
+        #     "overall_quality": verdict.overall_quality,
+        #     "quality_note": verdict.quality_note,
+        #     "router_domain_correct": verdict.router_domain_correct,
+        #     "router_note": verdict.router_note,
+        #     "response_relevant": verdict.response_relevant,
+        #     "relevance_note": verdict.relevance_note,
+        #     "blocked_count": sum(1 for v in verdict.verdicts if not v.approved),
+        #     "suggestions": [
+        #         {
+        #             "text": ar.suggestions[v.index],
+        #             "original_risk": ar.risk_levels[v.index],
+        #             "approved": v.approved,
+        #             "adjusted_risk": v.adjusted_risk,
+        #             "block_reason": v.block_reason,
+        #             "factual": v.factual,
+        #             "factuality_note": v.factuality_note,
+        #         }
+        #         for v in verdict.verdicts
+        #     ],
+        # },
     }
 
     dest = Path(path)

@@ -1,3 +1,5 @@
+# JUDGE SYSTEM DISABLED — this module is kept for reference only and is no longer imported.
+
 """
 LLM-as-a-Judge safety and quality layer.
 

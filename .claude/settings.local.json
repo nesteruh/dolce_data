@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-Content \"c:\\\\projc\\\\hackaton\\\\dolce_data\\\\src\\\\collectors.py\")",
+      "Bash(Measure-Object -Line)",
+      "PowerShell(\\(Get-Content \"c:\\\\projc\\\\hackaton\\\\dolce_data\\\\src\\\\collectors.py\"\\).Count)"
+    ]
+  }
+}

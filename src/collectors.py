@@ -1189,7 +1189,7 @@ def collect_user_activity(os_name: str) -> UserActivityData:
         f_recent = ex.submit(_recent_fn)
         f_apps   = ex.submit(_apps_fn)
         f_shell  = ex.submit(_shell_history)
-        f_logins = ex.submit(_last_logins, os_name)
+        f_logins = ex.submit(_last_logins, os_name) 
 
         data.recent_files  = f_recent.result()
         data.frequent_apps = f_apps.result()
@@ -1197,3 +1197,29 @@ def collect_user_activity(os_name: str) -> UserActivityData:
         data.last_logins   = f_logins.result()
 
     return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File context (for FileAgent)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class FileContextData:
+    os_name: str
+    home: str
+    desktop: str
+    downloads: str
+    documents: str
+    cwd: str
+
+
+def collect_file_context(os_name: str) -> FileContextData:
+    home = Path.home()
+    return FileContextData(
+        os_name=os_name,
+        home=str(home),
+        desktop=str(home / "Desktop"),
+        downloads=str(home / "Downloads"),
+        documents=str(home / "Documents"),
+        cwd=str(Path.cwd()),
+    )
