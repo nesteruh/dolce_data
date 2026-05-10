@@ -115,7 +115,7 @@ def _get_whisper_model():
         warnings.filterwarnings("ignore", message=".*unauthenticated.*HF Hub.*")
         from faster_whisper import WhisperModel
         _whisper_instance = WhisperModel(
-            "large-v3-turbo", device="cpu", compute_type="int8"
+            "base", device="cpu", compute_type="int8"
         )
     return _whisper_instance
 
@@ -146,7 +146,7 @@ class _VoiceWorker(QObject):
 
         try:
             model = _get_whisper_model()
-            segments, _ = model.transcribe(tmppath, beam_size=5)
+            segments, _ = model.transcribe(tmppath, beam_size=1)
             text = " ".join(seg.text for seg in segments).strip()
             self.transcribed.emit(text)
         except Exception as exc:
@@ -571,6 +571,7 @@ class SpotlightWindow(QWidget):
         self._set_mic("🎙")
         self._input.setText(text)
         self._input.setFocus()
+        self._on_submit()
 
     def _on_voice_error(self, msg: str) -> None:
         self._set_mic("🎙")
