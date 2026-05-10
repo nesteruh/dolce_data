@@ -88,14 +88,18 @@ class _Worker(QObject):
     done  = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, query: str, client, model: str) -> None:
+    def __init__(self, query: str, client, model: str, token_buf: list) -> None:
         super().__init__()
         self.query, self.client, self.model = query, client, model
+        self._token_buf = token_buf
 
     def run(self) -> None:
         from src.router import handle
         try:
-            result = handle(self.query, self.client, self.model, verbose=False)
+            result = handle(
+                self.query, self.client, self.model, verbose=False,
+                on_token=self._token_buf.append,
+            )
             self.done.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -116,6 +120,7 @@ class SpotlightWindow(QWidget):
         self._worker: _Worker | None  = None
         self._spin_idx  = 0
         self._drag_pos  = None
+        self._token_buf: list = []
 
         flags = (
             Qt.WindowType.FramelessWindowHint
@@ -211,6 +216,11 @@ class SpotlightWindow(QWidget):
         self._act_layout.setSpacing(4)
         root.addWidget(self._act_panel)
 
+        # Poll timer — drains token buffer every 50 ms so text appears incrementally
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(50)
+        self._poll_timer.timeout.connect(self._drain_tokens)
+
         # Spinner timer
         self._spin_timer = QTimer(self)
         self._spin_timer.timeout.connect(self._tick_spinner)
@@ -260,7 +270,8 @@ class SpotlightWindow(QWidget):
         self._text.clear()
         self._start_spinner()
 
-        self._worker = _Worker(query, self.client, self.model)
+        self._token_buf.clear()
+        self._worker = _Worker(query, self.client, self.model, self._token_buf)
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -268,14 +279,31 @@ class SpotlightWindow(QWidget):
         self._worker.error.connect(self._on_error)
         self._worker.done.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._poll_timer.start()
         self._thread.start()
 
     # ── Result rendering ───────────────────────────────────────────────────────
 
+    def _drain_tokens(self) -> None:
+        n = len(self._token_buf)
+        if not n:
+            return
+        text = "".join(self._token_buf[:n])
+        del self._token_buf[:n]
+        if not self._text.isVisible():
+            self._stop_spinner()
+            self._expand()
+        self._text.insertPlainText(text)
+        sb = self._text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
     def _on_result(self, result) -> None:
+        self._poll_timer.stop()
+        self._drain_tokens()  # flush any tokens that arrived before done fired
         self._stop_spinner()
         self._expand()
 
+        self._text.clear()
         cursor = self._text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
