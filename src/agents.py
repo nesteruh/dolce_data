@@ -1132,6 +1132,7 @@ def run_file_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     ctx: FileContextData = collect_file_context(os_name)
@@ -1221,6 +1222,7 @@ def run_system_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    history: list[dict] | None = None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
 

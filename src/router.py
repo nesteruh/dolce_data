@@ -289,8 +289,7 @@ def handle(
         )
         _empty_verdict = JudgeVerdict(
             verdicts=[], router_domain_correct=False, router_note="All agents failed",
-            response_relevant=False, relevance_note="", overall_quality="POOR",
-            quality_note="", judge_model="",
+            judge_model="",
         )
         return JudgedResult(agent_result=_empty, verdict=_empty_verdict, domain=", ".join(domains))
 
