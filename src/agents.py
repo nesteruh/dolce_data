@@ -13,9 +13,11 @@ import json
 import re
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from openai import OpenAI
+
+from src.actions import parse_actions
 
 from src.collectors import (
     StorageData,
@@ -24,12 +26,14 @@ from src.collectors import (
     NetworkData,
     StartupData,
     UserActivityData,
+    FileContextData,
     collect_storage,
     collect_battery,
     collect_health,
     collect_network,
     collect_startup,
     collect_user_activity,
+    collect_file_context,
     detect_os,
 )
 
@@ -46,6 +50,7 @@ class AgentResult:
     suggestions: list[str]       # actionable suggestion strings
     risk_levels: list[str]       # parallel to suggestions: LOW / MEDIUM / HIGH
     full_response: str           # raw LLM text
+    actions: list = field(default_factory=list)  # list[Action] — executable actions
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,6 +70,7 @@ _SYSTEM_BASE = textwrap.dedent("""\
         2. Brief plain-language explanation of the root cause.
         3. Numbered suggestions — most impactful first, each on its own line:
            SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <specific action>
+           ACTION_<type>: <payload>          ← optional, only when concrete
         4. One short closing sentence.
     • Suggestion / overview question ("what are your suggestions?", "give me a report",
       "what should I do about X?", "how is my X?", "what is wrong with my X?",
@@ -78,6 +84,36 @@ _SYSTEM_BASE = textwrap.dedent("""\
            Each suggestion MUST include: what to do, the exact value/name from data,
            and why it matters. Never repeat the same suggestion.
         4. One closing sentence on expected benefit if suggestions are followed.
+
+    ACTION LINES — optional, add one immediately after a SUGGESTION when a
+    specific executable action is available. Format: ACTION_<type>: <payload>
+
+    Process / app:
+      ACTION_shell: <command>          ACTION_open_app: <name>
+      ACTION_open_file: <path>         ACTION_kill_process: <PID number ONLY>
+
+    Files (use | to separate parts):
+      ACTION_create_file: <path> | <content>    ACTION_copy_file: <src> | <dst>
+      ACTION_move_file: <src> | <dst>           ACTION_rename_file: <path> | <new name>
+      ACTION_delete_file: <path>                ACTION_mkdir: <path>
+      ACTION_compress: <src> | <out.zip>        ACTION_extract: <arc> | <dst>
+      ACTION_list_directory: <path>             ACTION_set_permissions: <path> | <mode>
+
+    System settings (no | needed unless shown):
+      ACTION_set_volume: <0-100>                ACTION_set_brightness: <0-100>
+      ACTION_toggle_dark_mode:                  ACTION_toggle_do_not_disturb: <on|off>
+      ACTION_toggle_wifi: <on|off>              ACTION_toggle_bluetooth: <on|off>
+      ACTION_connect_wifi: <SSID> | <password>  ACTION_disconnect_wifi:
+      ACTION_lock_screen:                       ACTION_sleep_now:
+      ACTION_set_sleep_timer: <minutes>         ACTION_empty_trash:
+      ACTION_send_notification: <title> | <body>
+
+    ACTION rules:
+    - ACTION_kill_process payload = ONE integer PID from the data. NEVER a command string.
+      Wrong: ACTION_kill_process: killall Chrome    Right: ACTION_kill_process: 10695
+    - One process per action — use separate SUGGESTION + ACTION pairs for multiple.
+    - Only reference values that appear VERBATIM in the data (PIDs, paths, names).
+    - No ACTION line is better than a wrong one.
 
     NEVER suggest deleting system files, disabling security features, or any
     action that could destabilise the OS.
@@ -116,17 +152,16 @@ def _llm_call(
     system: str,
     user: str,
     history: list[dict] | None = None,
+    json_mode: bool = True,
 ) -> str:
     messages: list[dict] = [{"role": "system", "content": system}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user})
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.1,
-        response_format={"type": "json_object"},
-    )
+    kwargs: dict = dict(model=model, messages=messages, temperature=0.1)
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = client.chat.completions.create(**kwargs)
     return response.choices[0].message.content or ""
 
 
@@ -142,6 +177,23 @@ def _parse_agent_json(data: dict) -> tuple[list[str], list[str]]:
         if text:
             suggestions.append(text)
             risks.append(risk)
+    return suggestions, risks
+
+
+def _parse_suggestions(text: str) -> tuple[list[str], list[str]]:
+    """Parse SUGGESTION [RISK:X]: lines from plain-text LLM output."""
+    suggestions: list[str] = []
+    risks: list[str] = []
+    for line in text.splitlines():
+        m = re.match(r"SUGGESTION\s+\[RISK:(\w+)\]:\s*(.*)", line.strip())
+        if m:
+            risk = m.group(1).upper()
+            if risk not in ("LOW", "MEDIUM", "HIGH"):
+                risk = "LOW"
+            text_part = m.group(2).strip()
+            if text_part:
+                suggestions.append(text_part)
+                risks.append(risk)
     return suggestions, risks
 
 
@@ -565,6 +617,7 @@ def run_storage_agent(
     llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
+    actions = parse_actions(llm_text, suggestions, risks)
 
     return AgentResult(
         agent="StorageAgent",
@@ -573,6 +626,7 @@ def run_storage_agent(
         suggestions=suggestions,
         risk_levels=risks,
         full_response=_format_full_response(data),
+        actions=actions,
     )
 
 
@@ -644,6 +698,7 @@ def run_battery_agent(
     llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
+    actions = parse_actions(llm_text, suggestions, risks)
 
     return AgentResult(
         agent="BatteryAgent",
@@ -652,6 +707,7 @@ def run_battery_agent(
         suggestions=suggestions,
         risk_levels=risks,
         full_response=_format_full_response(data),
+        actions=actions,
     )
 
 
@@ -721,6 +777,7 @@ def run_health_agent(
     llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
+    actions = parse_actions(llm_text, suggestions, risks)
 
     return AgentResult(
         agent="HealthAgent",
@@ -729,6 +786,7 @@ def run_health_agent(
         suggestions=suggestions,
         risk_levels=risks,
         full_response=_format_full_response(data),
+        actions=actions,
     )
 
 
@@ -862,6 +920,7 @@ def run_network_agent(
     llm_text = _llm_call(client, model, _NETWORK_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
+    actions = parse_actions(llm_text, suggestions, risks)
 
     return AgentResult(
         agent="NetworkAgent",
@@ -873,6 +932,7 @@ def run_network_agent(
             data,
             fallback="No actionable network issues detected from the available data.",
         ),
+        actions=actions,
     )
 
 
@@ -948,6 +1008,7 @@ def run_startup_agent(
     llm_text = _llm_call(client, model, _STARTUP_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
+    actions = parse_actions(llm_text, suggestions, risks)
 
     return AgentResult(
         agent="StartupAgent",
@@ -956,6 +1017,7 @@ def run_startup_agent(
         suggestions=suggestions,
         risk_levels=risks,
         full_response=_format_full_response(data),
+        actions=actions,
     )
 
 
@@ -1017,6 +1079,7 @@ def run_activity_agent(
     llm_text = _llm_call(client, model, _ACTIVITY_SYSTEM, user_msg, history)
     data = json.loads(llm_text)
     suggestions, risks = _parse_agent_json(data)
+    actions = parse_actions(llm_text, suggestions, risks)
 
     return AgentResult(
         agent="ActivityAgent",
@@ -1025,4 +1088,164 @@ def run_activity_agent(
         suggestions=suggestions,
         risk_levels=risks,
         full_response=_format_full_response(data),
+        actions=actions,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File Agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FILE_SYSTEM = textwrap.dedent("""\
+    You are the FILE OPERATIONS AGENT. You execute file system tasks such as
+    creating, writing, copying, moving, renaming, and deleting files and folders.
+
+    For every task, break it into ordered steps. For EACH step write:
+      SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: Step N — <plain description of what this step does>
+      ACTION_<type>: <payload>
+
+    Available action types and their payload format:
+      ACTION_create_file: <path> | <text content>      ← creates file, writes content
+      ACTION_copy_file:   <source> | <destination>     ← copies file or directory
+      ACTION_move_file:   <source> | <destination>     ← moves or renames
+      ACTION_delete_file: <path>                        ← deletes file or directory (HIGH)
+      ACTION_mkdir:       <path>                        ← creates directory tree
+      ACTION_open_file:   <path>                        ← opens file in default app
+      ACTION_shell:       <command>                     ← any other shell operation
+
+    Risk guide:
+      LOW    — creating files, copying, making directories, opening files
+      MEDIUM — overwriting existing files, moving, renaming
+      HIGH   — deleting files or directories
+
+    PATH RULES — use the exact paths provided in the context below.
+    NEVER use paths outside the user's home directory unless explicitly asked.
+    NEVER touch /System, /bin, /usr, /etc, /var, or any OS directory.
+    NEVER delete files without HIGH risk label.
+
+    After listing all steps, write a one-sentence summary of what was planned.
+""")
+
+
+def run_file_agent(
+    user_prompt: str,
+    client: OpenAI,
+    model: str,
+    os_name: str | None = None,
+) -> AgentResult:
+    os_name = os_name or detect_os()
+    ctx: FileContextData = collect_file_context(os_name)
+
+    raw_summary = textwrap.dedent(f"""\
+        OS: {os_name}
+
+        === PATH CONTEXT ===
+        Home:      {ctx.home}
+        Desktop:   {ctx.desktop}
+        Downloads: {ctx.downloads}
+        Documents: {ctx.documents}
+        CWD:       {ctx.cwd}
+    """)
+
+    user_msg = textwrap.dedent(f"""\
+        The user asked: "{user_prompt}"
+
+        {raw_summary}
+
+        Plan and emit every step needed to complete this task.
+        Use the exact paths from the context above.
+        Each step must have a SUGGESTION line followed immediately by its ACTION line.
+    """)
+
+    llm_text = _llm_call(client, model, _FILE_SYSTEM, user_msg, json_mode=False)
+    suggestions, risks = _parse_suggestions(llm_text)
+    actions = parse_actions(llm_text, suggestions, risks)
+
+    return AgentResult(
+        agent="FileAgent",
+        raw_data_summary=raw_summary,
+        analysis=llm_text,
+        suggestions=suggestions,
+        risk_levels=risks,
+        full_response=llm_text,
+        actions=actions,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System Settings Agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SYSTEM_SETTINGS_SYSTEM = textwrap.dedent("""\
+    You are the SYSTEM SETTINGS AGENT. You execute system configuration changes:
+    volume, brightness, Wi-Fi, Bluetooth, dark mode, Do Not Disturb, screen
+    locking, sleep, trash, and desktop notifications.
+
+    CRITICAL: Do NOT give manual instructions ("go to System Preferences...").
+    For EVERY requested change, emit a SUGGESTION line + ACTION line pair.
+    No exceptions — every step must be executable.
+
+    For each change, write exactly:
+      SUGGESTION [RISK:LOW]: Step N — <one sentence describing what this does>
+      ACTION_<type>: <payload>
+
+    Available action types and payload format:
+      ACTION_set_volume: <0–100>
+      ACTION_set_brightness: <0–100>
+      ACTION_toggle_dark_mode:                     (no payload needed)
+      ACTION_toggle_do_not_disturb: <on|off>
+      ACTION_toggle_wifi: <on|off>
+      ACTION_toggle_bluetooth: <on|off>
+      ACTION_connect_wifi: <SSID> | <password>
+      ACTION_disconnect_wifi:                      (no payload needed)
+      ACTION_lock_screen:                          (no payload needed)
+      ACTION_sleep_now:                            (no payload needed)
+      ACTION_set_sleep_timer: <minutes>
+      ACTION_empty_trash:                          (no payload needed)
+      ACTION_send_notification: <title> | <body>
+      ACTION_open_app: <exact app name>
+      ACTION_shell: <command>
+
+    Risk guide:
+      LOW    — volume, brightness, dark mode, DND, lock screen, notification
+      MEDIUM — sleep, disconnect Wi-Fi, sleep timer
+      HIGH   — empty trash
+
+    Execute ALL settings the user requested. List them in the order asked.
+    After all steps, write one sentence summarising what was configured.
+""")
+
+
+def run_system_agent(
+    user_prompt: str,
+    client: OpenAI,
+    model: str,
+    os_name: str | None = None,
+) -> AgentResult:
+    os_name = os_name or detect_os()
+
+    raw_summary = f"OS: {os_name}"
+
+    user_msg = textwrap.dedent(f"""\
+        The user asked: "{user_prompt}"
+
+        OS: {os_name}
+
+        Emit one SUGGESTION + ACTION pair for each setting change requested.
+        Do not skip any. Do not give manual instructions.
+    """)
+
+    llm_text = _llm_call(client, model, _SYSTEM_SETTINGS_SYSTEM, user_msg,
+                         json_mode=False)
+    suggestions, risks = _parse_suggestions(llm_text)
+    actions = parse_actions(llm_text, suggestions, risks)
+
+    return AgentResult(
+        agent="SystemAgent",
+        raw_data_summary=raw_summary,
+        analysis=llm_text,
+        suggestions=suggestions,
+        risk_levels=risks,
+        full_response=llm_text,
+        actions=actions,
     )

@@ -21,6 +21,8 @@ from src.agents import (
     run_startup_agent,
     run_activity_agent,
     run_fast_report,
+    run_file_agent,
+    run_system_agent,
 )
 from src.collectors import detect_os
 from src.judge import JudgedResult, run_judge
@@ -72,6 +74,32 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "activity", "frequent", "my usage", "what i've done", "what i did",
         "app usage", "usage", "how i use", "what apps", "which apps",
     ],
+    "file": [
+        "create file", "create a file", "make file", "new file",
+        "create folder", "create a folder", "make folder", "new folder", "mkdir",
+        "write to file", "add text to", "write text", "save text",
+        "copy file", "copy this file", "copy the file",
+        "move file", "move this file", "move the file",
+        "rename file", "rename the file", "rename folder",
+        "delete file", "remove file",
+        "on desktop", "on the desktop",
+        "to downloads", "to the downloads",
+        "to documents", "to the documents",
+    ],
+    "system": [
+        "volume", "set volume", "mute", "unmute",
+        "brightness", "set brightness", "dim screen",
+        "dark mode", "light mode", "dark theme", "light theme", "appearance",
+        "do not disturb", "focus mode", "dnd", "distraction",
+        "lock screen", "lock the screen", "lock my screen",
+        "sleep now", "put to sleep", "sleep my mac", "sleep my computer",
+        "bluetooth on", "bluetooth off", "turn on bluetooth", "turn off bluetooth",
+        "turn off wifi", "turn on wifi", "disable wifi", "enable wifi",
+        "empty trash", "clear trash",
+        "focus session", "work session", "focused", "concentrate",
+        "prepare my mac", "prepare my computer", "prepare for",
+        "set up for", "notification", "send notification",
+    ],
 }
 
 _AGENT_EMOJI: dict[str, str] = {
@@ -81,6 +109,8 @@ _AGENT_EMOJI: dict[str, str] = {
     "NetworkAgent": "🌐",
     "StartupAgent": "🚀",
     "ActivityAgent":"🔃",
+    "FileAgent":    "🗂️",
+    "SystemAgent":  "⚙️",
 }
 
 
@@ -153,9 +183,10 @@ def _merge_results(results: list[AgentResult]) -> AgentResult:
         response_parts.append(f"---\n\n### {emoji} {r.agent}\n\n{r.full_response}")
     merged_response = "\n\n".join(response_parts)
 
-    # Merge suggestions and risk levels from all agents
+    # Merge suggestions, risk levels, and actions from all agents
     all_suggestions = [s for r in results for s in r.suggestions]
     all_risks = [rv for r in results for rv in r.risk_levels]
+    all_actions = [a for r in results for a in r.actions]
 
     combined_agent_name = " + ".join(r.agent for r in results)
 
@@ -166,6 +197,7 @@ def _merge_results(results: list[AgentResult]) -> AgentResult:
         suggestions=all_suggestions,
         risk_levels=all_risks,
         full_response=merged_response,
+        actions=all_actions,
     )
 
 
@@ -174,12 +206,14 @@ def _merge_results(results: list[AgentResult]) -> AgentResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DISPATCH: dict[str, object] = {
-    "storage": run_storage_agent,
-    "battery": run_battery_agent,
-    "health":  run_health_agent,
-    "network": run_network_agent,
-    "startup": run_startup_agent,
-    "activity":run_activity_agent,
+    "storage":  run_storage_agent,
+    "battery":  run_battery_agent,
+    "health":   run_health_agent,
+    "network":  run_network_agent,
+    "startup":  run_startup_agent,
+    "activity": run_activity_agent,
+    "file":     run_file_agent,
+    "system":   run_system_agent,
 }
 
 

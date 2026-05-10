@@ -69,6 +69,16 @@ def _fmt_bytes(n: int) -> str:
     return f"{n}B"
 
 
+def _head(text: str, n: int = 30) -> str:
+    """Return at most n lines of text. Appends a truncation note when cut."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    if len(lines) <= n:
+        return text
+    return "\n".join(lines[:n]) + f"\n… ({len(lines) - n} more lines)"
+
+
 def _sh(cmd: list[str], timeout: int = 8) -> str:
     """Run a subprocess; return stdout or 'ERROR: ...' string."""
     try:
@@ -717,7 +727,7 @@ def _gpu_info_windows() -> str:
 
 
 def _gpu_info_macos() -> str:
-    return _sh(["system_profiler", "SPDisplaysDataType", "-detailLevel", "mini"])
+    return _head(_sh(["system_profiler", "SPDisplaysDataType", "-detailLevel", "mini"]), 20)
 
 
 def _gpu_info_linux() -> str:
@@ -928,8 +938,8 @@ def collect_network(os_name: str) -> NetworkData:
                 "| Select-Object -First 20 LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess "
                 "| Format-Table -AutoSize | Out-String).Trim()")
         elif os_name == "macos":
-            f_route = ex.submit(_sh, ["netstat", "-rn"])
-            f_dns   = ex.submit(_sh, ["scutil", "--dns"])
+            f_route = ex.submit(lambda: _head(_sh(["netstat", "-rn"]), 25))
+            f_dns   = ex.submit(lambda: _head(_sh(["scutil", "--dns"]), 20))
             f_fw    = ex.submit(_sh, ["pfctl", "-s", "info"])
             f_wifi  = ex.submit(_sh, [
                 "/System/Library/PrivateFrameworks/Apple80211.framework"
@@ -1071,11 +1081,11 @@ def _recent_files_windows() -> str:
 
 
 def _recent_files_macos() -> str:
-    return _sh([
+    return _head(_sh([
         "mdfind", "-onlyin", str(Path.home()),
         "kMDItemLastUsedDate >= $time.now(-30d)",
         "-attr", "kMDItemPath,kMDItemLastUsedDate",
-    ])
+    ]), 30)
 
 
 def _recent_files_linux() -> str:
@@ -1136,9 +1146,9 @@ def _frequent_apps_windows() -> str:
 
 
 def _frequent_apps_macos() -> str:
-    return _sh(["mdfind",
+    return _head(_sh(["mdfind",
                 "kMDItemLastUsedDate >= $time.now(-30d) && kMDItemContentTypeTree == 'com.apple.application-bundle'",
-                "-attr", "kMDItemDisplayName,kMDItemLastUsedDate"])
+                "-attr", "kMDItemDisplayName,kMDItemLastUsedDate"]), 25)
 
 
 def _frequent_apps_linux() -> str:
@@ -1197,3 +1207,35 @@ def collect_user_activity(os_name: str) -> UserActivityData:
         data.last_logins   = f_logins.result()
 
     return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File Operation Context
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class FileContextData:
+    os_name: str
+    home: str
+    desktop: str
+    downloads: str
+    documents: str
+    cwd: str
+
+
+def collect_file_context(os_name: str) -> FileContextData:
+    home = Path.home()
+
+    def _candidate(*parts: str) -> str:
+        """Return the path if it exists, otherwise just the constructed path string."""
+        p = home.joinpath(*parts)
+        return str(p)
+
+    return FileContextData(
+        os_name=os_name,
+        home=str(home),
+        desktop=_candidate("Desktop"),
+        downloads=_candidate("Downloads"),
+        documents=_candidate("Documents"),
+        cwd=str(Path.cwd()),
+    )

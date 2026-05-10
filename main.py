@@ -5,6 +5,7 @@ Run with:  python main.py
 
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -29,8 +30,8 @@ except ImportError:
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_API_KEY  = os.getenv("OLLAMA_API_KEY",  "ollama")
-MODEL           = os.getenv("AGENT_MODEL",  "llama3.2")
-JUDGE_MODEL     = os.getenv("JUDGE_MODEL",  MODEL)
+MODEL           = os.getenv("AGENT_MODEL",      "qwen2.5:7b")
+JUDGE_MODEL     = os.getenv("JUDGE_MODEL",      "llama3.1:8b")
 
 BANNER = """
 ╔══════════════════════════════════════════════════════╗
@@ -268,6 +269,81 @@ def _show_judge_verdict(judged) -> None:
         print(sep)
 
 
+def _show_and_run_actions(actions: list) -> None:
+    """Display available executable actions and run whichever the user picks."""
+    if not actions:
+        return
+
+    from src.actions import ActionExecutor, type_label
+
+    _RISK_COLOR = {"LOW": "green", "MEDIUM": "yellow", "HIGH": "red", "CRITICAL": "bold red"}
+
+    if _RICH:
+        lines = ["[bold]Executable actions[/bold]  — type a number to run, Enter to skip\n"]
+        for i, action in enumerate(actions, 1):
+            rc = _RISK_COLOR.get(action.risk.upper(), "white")
+            label = type_label(action.type)
+            lines.append(
+                f"  [[{rc}]{i}[/{rc}]]  [dim]{label:<22}[/dim]  {action.description[:65]}"
+            )
+            lines.append(f"       [dim]↳ {action.payload[:80]}[/dim]")
+        console.print(Panel("\n".join(lines), border_style="cyan", padding=(0, 2)))
+    else:
+        print("\nExecutable actions (type a number to run, Enter to skip):")
+        for i, action in enumerate(actions, 1):
+            label = type_label(action.type)
+            print(f"  [{i}] [{action.risk}] {label}: {action.description}")
+            print(f"      ↳ {action.payload}")
+
+    executor = ActionExecutor()
+
+    while True:
+        try:
+            choice = _ask("Run action #").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if not choice:
+            break
+
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            _print("Enter a number.", "red")
+            continue
+
+        if idx < 0 or idx >= len(actions):
+            _print(f"Enter a number between 1 and {len(actions)}.", "red")
+            continue
+
+        action = actions[idx]
+
+        if action.risk.upper() in ("MEDIUM", "HIGH"):
+            confirm = _ask(
+                f"⚠️  [{action.risk}] risk — confirm? (yes/no)"
+            ).strip().lower()
+            if confirm not in ("yes", "y"):
+                _print("Skipped.", "dim")
+                continue
+
+        result = executor.execute(action)
+
+        if _RICH:
+            if result.success:
+                console.print(f"[green]✓ Done[/green]")
+                if result.output:
+                    console.print(Panel(result.output, border_style="dim", padding=(0, 2)))
+            else:
+                console.print(f"[red]✗ Failed:[/red] {result.error}")
+        else:
+            if result.success:
+                print("✓ Done")
+                if result.output:
+                    print(result.output)
+            else:
+                print(f"✗ Failed: {result.error}")
+
+
 def _spinner_call(fn, *args, **kwargs):
     """Run fn(*args, **kwargs) with a spinner if Rich is available."""
     if _RICH:
@@ -318,11 +394,13 @@ def main() -> None:
             break
 
         try:
+            _t0 = time.perf_counter()
             result = _spinner_call(
                 handle, user_input, client, MODEL,
                 judge_model=JUDGE_MODEL, verbose=False,
                 history=conversation_history[-_MAX_HISTORY_TURNS:] or None,
             )
+            _elapsed = time.perf_counter() - _t0
             is_fast = result.agent_result.agent == "FastReport"
             if not is_fast:
                 _show_raw_data(result.agent_result.raw_data_summary, result.agent_result.agent)
@@ -330,7 +408,6 @@ def main() -> None:
                 _show_blocked_answer(result)
             else:
                 _show_answer(result.agent_result.full_response)
-                # Only record successful (non-blocked) turns in session memory
                 conversation_history.append({"role": "user", "content": user_input})
                 conversation_history.append({"role": "assistant", "content": result.agent_result.analysis})
             if is_fast:
@@ -346,6 +423,8 @@ def main() -> None:
                     print("[ Fast Report Mode — no LLM, no judge ]")
             else:
                 _show_judge_verdict(result)
+            _print(f"⏱  Response in {_elapsed:.1f}s", "dim")
+            _show_and_run_actions(result.agent_result.actions)
             from src.history import save_entry
             save_entry(user_input, result)
         except Exception as exc:
