@@ -1,7 +1,7 @@
 """
-Specialist agents: Storage, Battery, Health.
+Specialist agents: Storage, Battery, Health, Network, Startup, Activity, File, System, Document.
 Each agent:
-  1. Collects real system data via collectors.py
+  1. Collects real system data (or runs a search tool) via the appropriate subsystem
   2. Builds a structured context prompt
   3. Calls the LLM to produce a polished, user-facing response
   4. Returns a formatted AgentResult
@@ -9,7 +9,11 @@ Each agent:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import re
+import sys
 import textwrap
 from dataclasses import dataclass, field
 
@@ -823,4 +827,293 @@ def run_system_agent(
         risk_levels=risks,
         full_response=llm_text,
         actions=actions,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Document Agent — knowledge base search & RAG
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Absolute path to agents/search/ so its relative imports resolve correctly.
+_SEARCH_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "agents", "search")
+)
+
+
+def _ensure_search_path() -> None:
+    if _SEARCH_DIR not in sys.path:
+        sys.path.insert(0, _SEARCH_DIR)
+
+
+_DOCUMENT_SYSTEM = textwrap.dedent("""\
+    You are the DOCUMENT AGENT. You help users find and understand files stored
+    in their personal knowledge base (locally indexed documents).
+
+    You receive structured search results and must respond ONLY based on what
+    those results contain. Never invent file names, paths, or document content.
+
+    TASK TYPES and their expected response style:
+
+    INDEX: Confirm what was indexed (folder path + progress summary). 2-3 sentences.
+
+    FILENAME SEARCH: List found files with full paths and match scores. If nothing
+    found, say so and suggest trying a content search or checking the spelling.
+
+    CONTENT SEARCH: List the relevant files (name + path). For each, add one sentence
+    from its summary explaining why it matches. If nothing found, say the knowledge
+    base has no files on that topic and suggest indexing the relevant folder first.
+
+    RAG (question answering): Answer the question directly using ONLY the provided
+    document content. Cite the source file after every fact: (source: filename).
+    If the answer is not in the documents, say so — do not guess.
+
+    FILE ANALYSIS: Report the file summary and PII status clearly. If the file is
+    not indexed, say so and suggest indexing its parent folder.
+
+    SUGGESTION [RISK:LOW]: <action>   — use only when a concrete next step helps.
+
+    CRITICAL: Only reference file names, paths, and content that appear VERBATIM
+    in the results. NEVER hallucinate file names, paths, or document content.
+""")
+
+
+# ── Task discrimination ───────────────────────────────────────────────────────
+
+_DOC_TASK_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("index", re.compile(
+        r'\b(index|reindex|re-index|scan\s+and\s+index|add\s+to\s+(index|knowledge))\b',
+        re.IGNORECASE,
+    )),
+    ("file_analysis", re.compile(
+        r'(?:analyze|tell\s+me\s+about|what\s+is\s+this|summarize|check|about)\s+'
+        r'(?:the\s+file\s+)?([/~][^\s"\']+\.[a-zA-Z0-9]{1,6})',
+        re.IGNORECASE,
+    )),
+    ("content_search", re.compile(
+        r'(?:'
+        r'(?:find|search\s+for|look\s+for|get)\s+(?:a\s+|an\s+|some\s+)?(?:file|document|doc)s?\s+'
+        r'(?:about|on|related\s+to|that\s+(?:mention|discuss|contain|talk\s+about))'
+        r'|(?:file|document|doc)s?\s+(?:that\s+)?(?:mention|discuss|contain|talk\s+about|about|on)\b'
+        r'|looking\s+for\s+(?:a\s+|an\s+)?(?:file|document|doc)'
+        r'|do\s+i\s+have\s+(?:a\s+|an\s+)?(?:file|document|anything)\s+(?:about|on|related\s+to|mention)'
+        r'|which\s+(?:file|document)\s+(?:has|contains|mentions|discusses)'
+        r'|(?:any|some)\s+(?:file|document)s?\s+(?:about|on|related\s+to)'
+        r'|i(?:\'m|\s+am)\s+looking\s+for\s+(?:a\s+|an\s+)?(?:file|document)'
+        r'|find\s+(?:a\s+)?(?:file|document)\s+(?:about|on|mentioning|discussing)'
+        r'|i\s+want\s+(?:a\s+)?(?:file|document)\s+(?:about|mentioning|on)'
+        r')',
+        re.IGNORECASE,
+    )),
+    ("filename_search", re.compile(
+        r'(?:where\s+is\s+(?:my\s+|the\s+)?|where\'s\s+(?:my\s+|the\s+)?'
+        r'|find\s+(?:my\s+)?file\s+(?:named?\s+|called\s+)?'
+        r'|locate\s+(?:my\s+|the\s+)?)',
+        re.IGNORECASE,
+    )),
+]
+
+
+def _extract_path(prompt: str) -> str | None:
+    m = re.search(r'["\']([^"\']+)["\']', prompt)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'([/~][^\s,;]+|[A-Za-z]:\\[^\s,;]+)', prompt)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _extract_filename_query(prompt: str) -> str:
+    cleaned = re.sub(
+        r'(?i)(?:where\s+is\s+(?:my\s+)?|where\'s\s+(?:my\s+)?'
+        r'|find\s+(?:my\s+)?(?:file\s+)?(?:named?\s+|called\s+)?'
+        r'|locate\s+(?:my\s+)?)',
+        "",
+        prompt,
+    ).strip().rstrip("?").strip()
+    return cleaned or prompt
+
+
+def _extract_content_query(prompt: str) -> str:
+    cleaned = re.sub(
+        r'(?i)(?:'
+        r'(?:find|search\s+for|look\s+for|get)\s+(?:a\s+|an\s+|some\s+)?'
+        r'(?:file|document|doc)s?\s+(?:about|on|related\s+to|that\s+(?:mention|discuss|contain))'
+        r'|(?:file|document|doc)s?\s+(?:that\s+)?(?:mention|discuss|contain|about|on)\b'
+        r'|looking\s+for\s+(?:a\s+)?(?:file|document|doc)(?:\s+about)?'
+        r'|do\s+i\s+have\s+(?:a\s+)?(?:file|document)\s+(?:about|on|related\s+to)?'
+        r'|which\s+(?:file|document)\s+(?:has|contains|mentions|discusses)'
+        r'|find\s+(?:a\s+)?(?:file|document)\s+(?:about|on|mentioning|discussing)'
+        r'|i\s+want\s+(?:a\s+)?(?:file|document)\s+(?:about|mentioning|on)'
+        r'|i(?:\'m|\s+am)\s+looking\s+for\s+(?:a\s+)?(?:file|document)(?:\s+(?:about|on|that))?'
+        r')',
+        "",
+        prompt,
+    ).strip().rstrip("?").strip()
+    return cleaned or prompt
+
+
+def _discriminate_doc_task(prompt: str) -> tuple[str, dict]:
+    """Classify prompt into a document task type and extract its parameters."""
+    for task, pattern in _DOC_TASK_PATTERNS:
+        if pattern.search(prompt):
+            if task == "index":
+                return task, {"path": _extract_path(prompt)}
+            if task == "file_analysis":
+                m = re.search(r'([/~][^\s"\']+\.[a-zA-Z0-9]{1,6})', prompt)
+                return task, {"path": m.group(1) if m else _extract_path(prompt)}
+            if task == "content_search":
+                return task, {"query": _extract_content_query(prompt)}
+            if task == "filename_search":
+                return task, {"query": _extract_filename_query(prompt)}
+    return "rag", {"query": prompt}
+
+
+# ── Agent entry point ─────────────────────────────────────────────────────────
+
+def run_document_agent(
+    user_prompt: str,
+    client: OpenAI,
+    model: str,
+    os_name: str | None = None,
+    on_token=None,
+) -> AgentResult:
+    """Knowledge-base search and retrieval agent."""
+    _ensure_search_path()
+
+    task, params = _discriminate_doc_task(user_prompt)
+    raw_lines: list[str] = [f"Task: {task.upper()}"]
+    tool_data = ""
+
+    if task == "index":
+        folder = params.get("path")
+        if not folder:
+            tool_data = (
+                "ERROR: No folder path detected in the prompt. "
+                "Please provide a path, e.g. 'index my folder at /Users/alice/Documents'."
+            )
+        else:
+            raw_lines.append(f"Path: {folder}")
+            try:
+                from indexing.indexer import build_index
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    build_index(folder)
+                progress = buf.getvalue().strip()
+                tool_data = (
+                    f"Indexing complete.\nFolder: {folder}\n"
+                    f"Progress log:\n{progress or '(no output)'}"
+                )
+                raw_lines.append(f"Progress:\n{progress}")
+            except Exception as exc:
+                tool_data = f"Indexing failed: {exc}"
+                raw_lines.append(f"Error: {exc}")
+
+    elif task == "file_analysis":
+        path = params.get("path") or ""
+        raw_lines.append(f"Path: {path}")
+        try:
+            from retrieval.searcher import get_file_analysis
+            result = get_file_analysis(path)
+            if result["indexed"]:
+                pii_tag = "PII detected" if result["pii_detected"] else "No PII detected"
+                tool_data = (
+                    f"File: {result['file_name']}\n"
+                    f"Path: {result['file_path']}\n"
+                    f"Indexed: yes\n"
+                    f"PII: {pii_tag}\n"
+                    f"Summary: {result['summary'] or '(no summary available)'}"
+                )
+            else:
+                tool_data = (
+                    f"'{path}' is not in the knowledge base. "
+                    "Index its parent folder first."
+                )
+            raw_lines.append(tool_data)
+        except Exception as exc:
+            tool_data = f"File analysis failed: {exc}"
+            raw_lines.append(f"Error: {exc}")
+
+    elif task == "content_search":
+        query = params.get("query", user_prompt)
+        raw_lines.append(f"Query: {query}")
+        try:
+            from retrieval.searcher import get_relevant_filenames
+            results = get_relevant_filenames(query, k=5)
+            if results:
+                lines = [f"Found {len(results)} file(s) relevant to: '{query}'"]
+                for i, r in enumerate(results, 1):
+                    lines.append(f"{i}. {r['file_name']}\n   Path: {r['file_path']}")
+                tool_data = "\n".join(lines)
+            else:
+                tool_data = f"No indexed files found about: '{query}'"
+            raw_lines.append(tool_data)
+        except Exception as exc:
+            tool_data = f"Content search failed: {exc}"
+            raw_lines.append(f"Error: {exc}")
+
+    elif task == "filename_search":
+        query = params.get("query", user_prompt)
+        raw_lines.append(f"Query: {query}")
+        try:
+            from retrieval.searcher import fast_filename_search
+            results = fast_filename_search(query, max_results=10)
+            if results:
+                lines = [f"Found {len(results)} file(s) matching '{query}':"]
+                for r in results:
+                    lines.append(
+                        f"  • {r['file_name']} (score: {r['score']})\n"
+                        f"    {r['file_path']}"
+                    )
+                tool_data = "\n".join(lines)
+            else:
+                tool_data = f"No files found matching '{query}' in the knowledge base."
+            raw_lines.append(tool_data)
+        except Exception as exc:
+            tool_data = f"Filename search failed: {exc}"
+            raw_lines.append(f"Error: {exc}")
+
+    else:  # rag
+        query = params.get("query", user_prompt)
+        raw_lines.append(f"Query: {query}")
+        try:
+            from retrieval.searcher import get_document_context
+            result = get_document_context(query, token_budget=1500)
+            if result["context"]:
+                tool_data = (
+                    f"Retrieved context for: '{query}'\n"
+                    f"Token estimate: {result['token_estimate']}\n\n"
+                    f"{result['context']}"
+                )
+                raw_lines.append(f"Sources: {result.get('sources', [])}")
+            else:
+                tool_data = (
+                    f"No relevant content found in the knowledge base for: '{query}'"
+                )
+            raw_lines.append(tool_data[:400])
+        except Exception as exc:
+            tool_data = f"RAG retrieval failed: {exc}"
+            raw_lines.append(f"Error: {exc}")
+
+    raw_data_summary = "\n".join(raw_lines)
+
+    user_message = (
+        f"User question: {user_prompt}\n\n"
+        f"=== SEARCH RESULTS ===\n{tool_data}"
+    )
+    full_response = _llm_call(
+        client, model, _DOCUMENT_SYSTEM, user_message,
+        json_mode=False, on_token=on_token,
+    )
+
+    suggestions, risk_levels = _parse_suggestions(full_response)
+
+    return AgentResult(
+        agent="DocumentAgent",
+        raw_data_summary=raw_data_summary,
+        analysis=full_response,
+        suggestions=suggestions,
+        risk_levels=risk_levels,
+        full_response=full_response,
+        actions=[],
     )

@@ -22,6 +22,7 @@ from src.agents import (
     run_activity_agent,
     run_file_agent,
     run_system_agent,
+    run_document_agent,
 )
 from src.collectors import detect_os
 # from src.judge import JudgedResult, run_judge  # JUDGE DISABLED
@@ -32,6 +33,37 @@ from src.collectors import detect_os
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DOMAIN_KEYWORDS: dict[str, list[str]] = {
+    "document": [
+        # Indexing
+        "index my", "index the", "index this folder", "index this directory",
+        "reindex", "re-index", "add to index", "add to knowledge base",
+        "scan and index", "start indexing",
+        # Content-based file search
+        "looking for a file about", "looking for a document about",
+        "find a file about", "find a document about",
+        "file that mentions", "files that mention",
+        "file that contains", "file about", "files about",
+        "document about", "documents about",
+        "document that mentions", "document that contains",
+        "which file mentions", "which file contains", "which file discusses",
+        "which document mentions", "which document contains",
+        "do i have a file about", "do i have a document about",
+        "search my files for", "search my documents for", "search my docs",
+        "any file about", "any document about", "any files about",
+        "i want a file mentioning", "i want a file about",
+        "i'm looking for a file", "im looking for a file",
+        # Filename search
+        "where is my", "where's my",
+        # RAG / knowledge base
+        "in my documents", "from my documents", "according to my documents",
+        "in my files", "from my files", "according to my files",
+        "what do my files say", "what does my file say",
+        "my knowledge base", "my indexed files",
+        "based on my documents", "based on my files",
+        "summarize the file", "summarize my file",
+        "what is in my file", "what does the document say",
+        "from the indexed", "tell me what the file",
+    ],
     "storage": [
         "disk", "storage", "space", "free space", "gb", "tb", "cache",
         "temp", "large file", "download", "trash", "full", "clean", "wipe",
@@ -92,14 +124,15 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
 }
 
 _AGENT_EMOJI: dict[str, str] = {
-    "StorageAgent": "🗄️",
-    "BatteryAgent": "🔋",
-    "HealthAgent":  "💻",
-    "NetworkAgent": "🌐",
-    "StartupAgent": "🚀",
-    "ActivityAgent":"🔃",
-    "FileAgent":    "📂",
-    "SystemAgent":  "⚙️",
+    "StorageAgent":   "🗄️",
+    "BatteryAgent":   "🔋",
+    "HealthAgent":    "💻",
+    "NetworkAgent":   "🌐",
+    "StartupAgent":   "🚀",
+    "ActivityAgent":  "🔃",
+    "FileAgent":      "📂",
+    "SystemAgent":    "⚙️",
+    "DocumentAgent":  "📄",
 }
 
 
@@ -162,12 +195,14 @@ def _classify(prompt: str) -> list[str]:
             if kw in lower:
                 scores[domain] += 1
 
+    if scores.get("document", 0) >= 1:
+        return ["document"]
     if scores.get("file", 0) >= 1:
         return ["file"]
     if scores.get("system", 0) >= 1 or _has_system_action_intent(lower) or _has_kill_intent(lower):
         return ["system"]
 
-    matched = [d for d, s in scores.items() if s >= 1 and d not in ("file", "system")]
+    matched = [d for d, s in scores.items() if s >= 1 and d not in ("file", "system", "document")]
     if not matched:
         return ["health"]
 
@@ -224,14 +259,15 @@ def _merge_results(results: list[AgentResult]) -> AgentResult:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DISPATCH: dict[str, object] = {
-    "storage": run_storage_agent,
-    "battery": run_battery_agent,
-    "health":  run_health_agent,
-    "network": run_network_agent,
-    "startup": run_startup_agent,
-    "activity":run_activity_agent,
-    "file":    run_file_agent,
-    "system":  run_system_agent,
+    "storage":  run_storage_agent,
+    "battery":  run_battery_agent,
+    "health":   run_health_agent,
+    "network":  run_network_agent,
+    "startup":  run_startup_agent,
+    "activity": run_activity_agent,
+    "file":     run_file_agent,
+    "system":   run_system_agent,
+    "document": run_document_agent,
 }
 
 

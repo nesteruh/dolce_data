@@ -4,6 +4,9 @@ psutil
 rich
 chromadb
 ollama
-markitdown
+markitdown[all]
 PyMuPDF
 python-docx
+sounddevice
+soundfile
+faster-whisper
