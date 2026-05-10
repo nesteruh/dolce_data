@@ -72,9 +72,14 @@ _SYSTEM_BASE = textwrap.dedent("""\
                             restart_process  delete_file  mkdir  create_file  copy_file
                             move_file  compress  extract  list_directory  set_permissions
            Use ACTION_shell for any terminal/shell command. Use specific types when applicable.
-           Payload for shell: the exact command string.
-           Payload for kill_process / force_quit_app: process name or PID.
-           Payload for file ops: path  (or  source | destination  for copy/move).
+           Payload rules (CRITICAL — wrong payloads break execution):
+           • shell:              the exact shell command string.
+                                 On macOS use quoted names: killall "Google Chrome" not killall google-chrome
+           • kill_process:       ONLY the process name or PID — e.g. "Google Chrome", NOT "kill Google Chrome"
+           • force_quit_app:     ONLY the process name or PID — e.g. "Google Chrome", NOT "force quit Google Chrome"
+           • open_app:           ONLY the app name — e.g. "iTerm2", NOT "openapp iTerm2; openapp WhatsApp"
+                                 One ACTION_open_app line per app.
+           • file ops:           path  (or  source | destination  for copy/move).
         4. One short closing sentence.
       Keep under 350 words.
 
