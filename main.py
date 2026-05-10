@@ -5,6 +5,7 @@ Run with:  python main.py
 
 import os
 import sys
+import threading as _threading
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -282,15 +283,46 @@ def _show_and_run_actions(actions) -> None:
             print(ar.output if ar.success else (ar.error or "(no output)"))
 
 
-def _spinner_call(fn, *args, **kwargs):
-    """Run fn(*args, **kwargs) with a spinner if Rich is available."""
-    if _RICH:
-        with Live(Spinner("dots", text="[cyan]Analysing and auditing your system…[/cyan]"),
-                  refresh_per_second=10, console=console):
+def _spinner_call(fn, *args, on_token=None, **kwargs):
+    """Run fn with a spinner during collection; stream LLM tokens when they arrive."""
+    if on_token is None:
+        # Non-streaming fallback (e.g. multi-domain queries)
+        if _RICH:
+            with Live(Spinner("dots", text="[cyan]Analysing and auditing your system…[/cyan]"),
+                      refresh_per_second=10, console=console):
+                return fn(*args, **kwargs)
+        else:
+            print("Analysing your system, please wait…")
             return fn(*args, **kwargs)
+
+    # Streaming path: spinner stops when first token arrives, then tokens print live.
+    first_token_event = _threading.Event()
+
+    def _wrapped_token(delta: str) -> None:
+        if not first_token_event.is_set():
+            first_token_event.set()
+        on_token(delta)
+
+    if _RICH:
+        live = Live(
+            Spinner("dots", text="[cyan]Analysing and auditing your system…[/cyan]"),
+            refresh_per_second=10,
+            console=console,
+        )
+        live.start()
+
+        def _stop_spinner() -> None:
+            first_token_event.wait(timeout=60)
+            live.stop()
+            console.print()  # newline after spinner clears
+
+        _threading.Thread(target=_stop_spinner, daemon=True).start()
+        result = fn(*args, on_token=_wrapped_token, **kwargs)
+        live.stop()  # ensure stopped if streaming never started
+        return result
     else:
         print("Analysing your system, please wait…")
-        return fn(*args, **kwargs)
+        return fn(*args, on_token=_wrapped_token, **kwargs)
 
 
 def main() -> None:
@@ -329,10 +361,25 @@ def main() -> None:
             break
 
         try:
+            _stream_buf: list[str] = []
+            def _on_token(delta: str) -> None:
+                _stream_buf.append(delta)
+                if _RICH:
+                    console.print(delta, end="", highlight=False)
+                else:
+                    print(delta, end="", flush=True)
+
             result = _spinner_call(handle, user_input, client, MODEL,
-                                   verbose=False)
+                                   verbose=False, on_token=_on_token)
+            if _stream_buf:
+                # Tokens were already printed live; show only raw data + actions.
+                if _RICH:
+                    console.print()  # final newline after streamed tokens
+                else:
+                    print()
             _show_raw_data(result.raw_data_summary, result.agent)
-            _show_answer(result.full_response)
+            if not _stream_buf:
+                _show_answer(result.full_response)
             # _show_judge_verdict(result)  # JUDGE DISABLED
             _actions = result.actions
             if _actions:

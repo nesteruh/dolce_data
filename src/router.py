@@ -228,6 +228,7 @@ def handle(
     model: str = "llama3.2",
     # judge_model: str | None = None,  # JUDGE DISABLED
     verbose: bool = False,
+    on_token=None,
 ) -> AgentResult:
     """
     Main pipeline:
@@ -248,7 +249,8 @@ def handle(
     # ── Single domain: simple path, no threading overhead ──────────────────
     if len(domains) == 1:
         runner = _DISPATCH[domains[0]]
-        result: AgentResult = runner(user_prompt, client, model, os_name)
+        # on_token enables streaming; only usable in single-domain (can't stream two agents at once)
+        result: AgentResult = runner(user_prompt, client, model, os_name, on_token=on_token)
         if verbose:
             print(f"[{result.agent}] Suggestions: {len(result.suggestions)}\n")
         # _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)  # JUDGE DISABLED
