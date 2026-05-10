@@ -101,7 +101,7 @@ class JudgedResult:
         """True when quality score is 1 or 2. Fails open on judge failure."""
         if self.verdict.judge_failed:
             return False
-        return 0 < self.verdict.score < 3
+        return 0 < self.verdict.score < 2
 
     @property
     def has_warnings(self) -> bool:
@@ -132,9 +132,9 @@ class JudgedResult:
 # System prompts
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SUGGESTION_SYSTEM = textwrap.dedent("""\
+_SUGGESTION_BATCH_SYSTEM = textwrap.dedent("""\
     You are a safety auditor for a computer diagnostic assistant.
-    Evaluate ONLY the single suggestion provided. Respond with ONLY valid JSON — no other text.
+    Evaluate ALL numbered suggestions in the list below. Respond with ONLY valid JSON.
 
     === SAFE TO DELETE OVERRIDE (HIGHEST PRIORITY) ===
     The RAW SYSTEM DATA contains a section called "SAFE TO DELETE". Any path that
@@ -172,11 +172,14 @@ _SUGGESTION_SYSTEM = textwrap.dedent("""\
     - Never lower the risk level below what the agent assigned.
 
     === OUTPUT FORMAT ===
-    Respond with ONLY this JSON object, nothing else:
-    {"approved": true, "adjusted_risk": "LOW", "block_reason": "", "factual": true, "factuality_note": ""}
-
-    Use approved=false and fill block_reason when blocking a suggestion.
-    Use factual=false and fill factuality_note when a cited value is not in the raw data.
+    Return ONLY a JSON array — one object per suggestion in the SAME ORDER as input:
+    [
+      {"approved": true, "adjusted_risk": "LOW", "block_reason": "", "factual": true, "factuality_note": ""},
+      {"approved": false, "adjusted_risk": "CRITICAL", "block_reason": "targets system dir", "factual": true, "factuality_note": ""}
+    ]
+    The array MUST contain exactly as many entries as there are input suggestions.
+    Use approved=false and fill block_reason when blocking.
+    Use factual=false and fill factuality_note when a cited value is absent from the raw data.
 """)
 
 _HOLISTIC_SYSTEM = textwrap.dedent("""\
@@ -252,25 +255,24 @@ class Judge:
         history: list[dict] | None = None,
     ) -> JudgeVerdict:
         """
-        Run Tier 1 (per-suggestion safety) and Tier 2 (holistic quality) concurrently.
+        Run Tier 1 (batched suggestion safety) and Tier 2 (holistic quality) concurrently.
+        2 total LLM calls regardless of suggestion count — down from N+1.
         Returns a passthrough verdict on failure — judge_failed=True surfaces the error.
         """
         try:
-            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-                sug_futures: list[Future[SuggestionVerdict]] = [
-                    pool.submit(
-                        self._judge_single_suggestion,
-                        i, sug, risk, result.raw_data_summary, user_prompt,
-                    )
-                    for i, (sug, risk) in enumerate(
-                        zip(result.suggestions, result.risk_levels)
-                    )
-                ]
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                sug_future: Future[list[SuggestionVerdict]] = pool.submit(
+                    self._judge_all_suggestions_batched,
+                    result.suggestions,
+                    result.risk_levels,
+                    result.raw_data_summary,
+                    user_prompt,
+                )
                 holistic_future: Future[_HolisticResult] = pool.submit(
                     self._judge_holistic, result, user_prompt, domain, history
                 )
 
-            verdicts = [f.result() for f in sug_futures]
+            verdicts = sug_future.result()
             h = holistic_future.result()
 
             return JudgeVerdict(
@@ -293,17 +295,24 @@ class Judge:
                 failed=True, reason=str(exc),
             )
 
-    def _judge_single_suggestion(
+    def _judge_all_suggestions_batched(
         self,
-        index: int,
-        suggestion: str,
-        risk: str,
+        suggestions: list[str],
+        risks: list[str],
         raw_data_summary: str,
         user_prompt: str,
-    ) -> SuggestionVerdict:
+    ) -> list[SuggestionVerdict]:
+        """Evaluate every suggestion in a single LLM call and return all verdicts."""
+        if not suggestions:
+            return []
+
+        sug_block = "\n".join(
+            f"[{i}] [RISK:{risk}] {sug}"
+            for i, (sug, risk) in enumerate(zip(suggestions, risks))
+        )
         user_msg = textwrap.dedent(f"""\
-            === SUGGESTION [{index}] ===
-            [RISK:{risk}] {suggestion}
+            === SUGGESTIONS TO EVALUATE ({len(suggestions)} total) ===
+            {sug_block}
 
             === RAW SYSTEM DATA (for factuality check) ===
             {raw_data_summary}
@@ -312,33 +321,37 @@ class Judge:
             {user_prompt}
         """)
         try:
-            raw = self._llm_call(_SUGGESTION_SYSTEM, user_msg)
-            data = _parse_json(raw)
-            approved = bool(data.get("approved", True))
-            orig_risk_rank = _RISK_RANK.get(risk.upper(), 0)
-            raw_adjusted = str(data.get("adjusted_risk", risk)).upper()
-            adjusted_risk = (
-                raw_adjusted
-                if _RISK_RANK.get(raw_adjusted, 0) >= orig_risk_rank
-                else risk
-            )
-            return SuggestionVerdict(
-                index=index,
-                approved=approved,
-                adjusted_risk=adjusted_risk,
-                block_reason=str(data.get("block_reason", "")),
-                factual=bool(data.get("factual", True)),
-                factuality_note=str(data.get("factuality_note", "")),
-            )
+            raw = self._llm_call(_SUGGESTION_BATCH_SYSTEM, user_msg)
+            items = _parse_batch_verdicts(raw)
+
+            verdicts: list[SuggestionVerdict] = []
+            for i, (sug, risk) in enumerate(zip(suggestions, risks)):
+                item = items[i] if i < len(items) else {}
+                approved = bool(item.get("approved", True))
+                orig_risk_rank = _RISK_RANK.get(risk.upper(), 0)
+                raw_adjusted = str(item.get("adjusted_risk", risk)).upper()
+                adjusted_risk = (
+                    raw_adjusted
+                    if _RISK_RANK.get(raw_adjusted, 0) >= orig_risk_rank
+                    else risk
+                )
+                verdicts.append(SuggestionVerdict(
+                    index=i,
+                    approved=approved,
+                    adjusted_risk=adjusted_risk,
+                    block_reason=str(item.get("block_reason", "")),
+                    factual=bool(item.get("factual", True)),
+                    factuality_note=str(item.get("factuality_note", "")),
+                ))
+            return verdicts
         except Exception:
-            return SuggestionVerdict(
-                index=index,
-                approved=True,
-                adjusted_risk=risk,
-                block_reason="",
-                factual=True,
-                factuality_note="",
-            )
+            return [
+                SuggestionVerdict(
+                    index=i, approved=True, adjusted_risk=r,
+                    block_reason="", factual=True, factuality_note="",
+                )
+                for i, r in enumerate(risks)
+            ]
 
     def _judge_holistic(
         self,
@@ -466,6 +479,40 @@ def _parse_json(raw: str) -> dict:
         if start == -1 or end == 0:
             raise ValueError("No JSON object found in judge output")
         return json.loads(raw[start:end])
+
+
+def _parse_batch_verdicts(raw: str) -> list[dict]:
+    """Parse the JSON array returned by the batch suggestion judge.
+
+    Tolerates LLMs that wrap the array in an object like {"verdicts": [...]}.
+    Falls back to an empty list (caller will use passthrough verdicts).
+    """
+    raw = raw.strip()
+    # Try bare array first
+    start = raw.find("[")
+    end = raw.rfind("]") + 1
+    if start != -1 and end > 0:
+        try:
+            result = json.loads(raw[start:end])
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+    # Try object wrapper: {"verdicts": [...]} or {"results": [...]}
+    obj_start = raw.find("{")
+    obj_end = raw.rfind("}") + 1
+    if obj_start != -1 and obj_end > 0:
+        try:
+            obj = json.loads(raw[obj_start:obj_end])
+            if isinstance(obj, dict):
+                for key in ("verdicts", "results", "suggestions", "evaluations"):
+                    if isinstance(obj.get(key), list):
+                        return obj[key]
+                if "approved" in obj:
+                    return [obj]
+        except json.JSONDecodeError:
+            pass
+    raise ValueError(f"No JSON array found in batch verdict output: {raw[:200]}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

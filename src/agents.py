@@ -26,12 +26,14 @@ from src.collectors import (
     NetworkData,
     StartupData,
     UserActivityData,
+    FileContextData,
     collect_storage,
     collect_battery,
     collect_health,
     collect_network,
     collect_startup,
     collect_user_activity,
+    collect_file_context,
     detect_os,
 )
 
@@ -133,10 +135,14 @@ _JSON_FORMAT = textwrap.dedent("""\
         {
           "text": "<specific, actionable step the user should take>",
           "risk": "LOW|MEDIUM|HIGH",
-          "rationale": "<one sentence explaining why this is recommended>"
+          "rationale": "<one sentence explaining why this is recommended>",
+          "action": "ACTION_<type>: <payload>"
         }
       ]
     }
+    The "action" field is OPTIONAL — include it only when a concrete executable action
+    applies (e.g. ACTION_shell, ACTION_kill_process, ACTION_set_volume).
+    Omit "action" entirely when no executable action is available or appropriate.
     For simple status questions ("what is X?"), return an empty suggestions array.
     For suggestion/overview questions, you MUST return at LEAST 3 suggestions — aim for 5.
     CRITICAL: Only include file names, sizes, process names, and paths that appear
@@ -397,7 +403,7 @@ def run_fast_report(
     lines.append("---")
 
     # ── CPU ──────────────────────────────────────────────────────────────────
-    load_display = d.load_avg_str or "—"
+    load_display = health.load_avg or "—"
     lines.append(f"\n### CPU  ·  Load: {load_display}\n")
     lines.append("| Impact | Process | CPU% | Risk |")
     lines.append("|--------|---------|------|------|")
@@ -486,6 +492,35 @@ def run_fast_report(
         risk_levels=[risk for risk, _ in recs[:8]],
         full_response=full_response,
     )
+
+
+def _safe_json(text: str) -> dict:
+    """Parse JSON from LLM output with graceful fallback on failure."""
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start != -1 and end > 0:
+            try:
+                return json.loads(text[start:end])
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return {"analysis": text, "suggestions": []}
+
+
+def _parse_json_actions(data: dict, suggestions: list[str], risks: list[str]) -> list:
+    """Extract executable actions from the optional 'action' field in JSON suggestions."""
+    lines: list[str] = []
+    for item, sug, risk in zip(data.get("suggestions", []), suggestions, risks):
+        lines.append(f"SUGGESTION [RISK:{risk}]: {sug}")
+        action_str = str(item.get("action", "")).strip()
+        if action_str:
+            lines.append(action_str)
+    if not lines:
+        return []
+    return parse_actions("\n".join(lines), suggestions, risks)
 
 
 def _format_full_response(data: dict, fallback: str = "") -> str:
@@ -614,9 +649,9 @@ def run_storage_agent(
     """)
 
     llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg, history)
-    data = json.loads(llm_text)
+    data = _safe_json(llm_text)
     suggestions, risks = _parse_agent_json(data)
-    actions = parse_actions(llm_text, suggestions, risks)
+    actions = _parse_json_actions(data, suggestions, risks)
 
     return AgentResult(
         agent="StorageAgent",
@@ -695,9 +730,9 @@ def run_battery_agent(
     """)
 
     llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg, history)
-    data = json.loads(llm_text)
+    data = _safe_json(llm_text)
     suggestions, risks = _parse_agent_json(data)
-    actions = parse_actions(llm_text, suggestions, risks)
+    actions = _parse_json_actions(data, suggestions, risks)
 
     return AgentResult(
         agent="BatteryAgent",
@@ -774,9 +809,9 @@ def run_health_agent(
     """)
 
     llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg, history)
-    data = json.loads(llm_text)
+    data = _safe_json(llm_text)
     suggestions, risks = _parse_agent_json(data)
-    actions = parse_actions(llm_text, suggestions, risks)
+    actions = _parse_json_actions(data, suggestions, risks)
 
     return AgentResult(
         agent="HealthAgent",
@@ -908,18 +943,19 @@ def run_network_agent(
         processes are using the most connections or bandwidth, whether the firewall
         is enabled, whether a VPN is active and could be causing slowdown, and
         whether any port is exposed unexpectedly. Give specific, data-driven
-        suggestions. Use the SUGGESTION format for each action.
+        suggestions.
 
         NOTE: Some sections may show "access denied" or "ERROR" — those sections have
         no usable data. Do NOT generate a suggestion for a section with no data.
         Only produce suggestions you can fully describe using values present above.
-        If fewer than 3 actionable items exist, return only the ones you can justify.
+        If no actionable issues exist, clearly state that the network looks healthy
+        and briefly describe the current state (active interfaces, firewall status).
     """)
 
     llm_text = _llm_call(client, model, _NETWORK_SYSTEM, user_msg, history)
-    data = json.loads(llm_text)
+    data = _safe_json(llm_text)
     suggestions, risks = _parse_agent_json(data)
-    actions = parse_actions(llm_text, suggestions, risks)
+    actions = _parse_json_actions(data, suggestions, risks)
 
     return AgentResult(
         agent="NetworkAgent",
@@ -1001,13 +1037,13 @@ def run_startup_agent(
         Analyse which startup items are third-party vs OS components, identify
         any that are resource-heavy or unnecessary, flag orphaned entries, and
         highlight what is slowing down boot if timing data is available.
-        Give specific, safe suggestions. Use the SUGGESTION format for each action.
+        Give specific, safe suggestions.
     """)
 
     llm_text = _llm_call(client, model, _STARTUP_SYSTEM, user_msg, history)
-    data = json.loads(llm_text)
+    data = _safe_json(llm_text)
     suggestions, risks = _parse_agent_json(data)
-    actions = parse_actions(llm_text, suggestions, risks)
+    actions = _parse_json_actions(data, suggestions, risks)
 
     return AgentResult(
         agent="StartupAgent",
@@ -1076,9 +1112,9 @@ def run_activity_agent(
     """)
 
     llm_text = _llm_call(client, model, _ACTIVITY_SYSTEM, user_msg, history)
-    data = json.loads(llm_text)
+    data = _safe_json(llm_text)
     suggestions, risks = _parse_agent_json(data)
-    actions = parse_actions(llm_text, suggestions, risks)
+    actions = _parse_json_actions(data, suggestions, risks)
 
     return AgentResult(
         agent="ActivityAgent",

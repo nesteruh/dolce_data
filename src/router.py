@@ -326,6 +326,7 @@ def handle(
             suggestions=merged.suggestions,
             risk_levels=merged.risk_levels,
             full_response=merged.full_response + note,
+            actions=merged.actions,
         )
 
     _judge_model = judge_model or os.getenv("JUDGE_MODEL", model)

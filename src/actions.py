@@ -477,8 +477,18 @@ def _toggle_wifi(os_name: str, payload: str) -> tuple[bool, str, str]:
             want = "off" if "enabled" in r.stdout else "on"
         return _sh(["nmcli", "radio", "wifi", want])
     if os_name == "windows":
-        state = "enable" if want in ("on", "") else "disable"
-        return _sh(["netsh", "interface", "set", "interface", "Wi-Fi", state])
+        adapter_action = "Enable" if want in ("on", "") else "Disable"
+        script = (
+            f"$w = Get-NetAdapter | Where-Object {{"
+            f"$_.PhysicalMediaType -eq '802.11' -or "
+            f"$_.InterfaceDescription -like '*Wi-Fi*' -or "
+            f"$_.InterfaceDescription -like '*Wireless*'"
+            f"}} | Select-Object -First 1; "
+            f"if ($w) {{ {adapter_action}-NetAdapter -Name $w.Name -Confirm:$false; "
+            f"Write-Output \"Wi-Fi ($($w.Name)) {adapter_action.lower()}d\" }} "
+            f"else {{ Write-Error 'No Wi-Fi adapter found' }}"
+        )
+        return _sh(["powershell", "-Command", script])
     return False, "", "Unsupported OS"
 
 
