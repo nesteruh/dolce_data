@@ -7,3 +7,6 @@ ollama
 markitdown
 PyMuPDF
 python-docx
+sounddevice
+soundfile
+faster-whisper

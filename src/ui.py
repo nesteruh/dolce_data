@@ -1,9 +1,12 @@
 """Spotlight-style popup UI for Dolce Data — PyQt6."""
 from __future__ import annotations
 
+import io
 import os
 import re
 import sys
+import tempfile
+import threading
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -101,6 +104,57 @@ class _Worker(QObject):
             self.error.emit(str(exc))
 
 
+# ── Local Whisper model (loaded once, reused across calls) ─────────────────────
+
+_whisper_instance = None
+
+def _get_whisper_model():
+    global _whisper_instance
+    if _whisper_instance is None:
+        import warnings
+        warnings.filterwarnings("ignore", message=".*unauthenticated.*HF Hub.*")
+        from faster_whisper import WhisperModel
+        _whisper_instance = WhisperModel(
+            "large-v3-turbo", device="cpu", compute_type="int8"
+        )
+    return _whisper_instance
+
+
+# ── Voice transcription worker ─────────────────────────────────────────────────
+
+class _VoiceWorker(QObject):
+    transcribed = pyqtSignal(str)
+    error       = pyqtSignal(str)
+
+    def __init__(self, frames: list, sample_rate: int) -> None:
+        super().__init__()
+        self._frames      = frames
+        self._sample_rate = sample_rate
+
+    def run(self) -> None:
+        try:
+            import numpy as np
+            import soundfile as sf
+        except ImportError as exc:
+            self.error.emit(f"Missing package: {exc}. Run: pip install faster-whisper sounddevice soundfile")
+            return
+
+        audio = np.concatenate(self._frames, axis=0)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            sf.write(f.name, audio, self._sample_rate)
+            tmppath = f.name
+
+        try:
+            model = _get_whisper_model()
+            segments, _ = model.transcribe(tmppath, beam_size=5)
+            text = " ".join(seg.text for seg in segments).strip()
+            self.transcribed.emit(text)
+        except Exception as exc:
+            self.error.emit(str(exc))
+        finally:
+            os.unlink(tmppath)
+
+
 # ── Main window ────────────────────────────────────────────────────────────────
 
 class SpotlightWindow(QWidget):
@@ -112,8 +166,14 @@ class SpotlightWindow(QWidget):
         super().__init__()
         self.client = client
         self.model  = model
-        self._thread: QThread | None  = None
-        self._worker: _Worker | None  = None
+        self._thread: QThread | None        = None
+        self._worker: _Worker | None        = None
+        self._voice_thread: QThread | None  = None
+        self._voice_worker: _VoiceWorker | None = None
+        self._recording     = False
+        self._rec_frames: list = []
+        self._rec_stream    = None
+        self._sample_rate   = 16000
         self._spin_idx  = 0
         self._drag_pos  = None
 
@@ -173,6 +233,17 @@ class SpotlightWindow(QWidget):
         self._spin_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bar.addWidget(self._spin_lbl)
         bar.addSpacing(4)
+
+        self._mic_btn = QLabel("🎙")
+        self._mic_btn.setFont(QFont(_FONT_UI, 15))
+        self._mic_btn.setStyleSheet(f"color: {_DIM};")
+        self._mic_btn.setFixedSize(26, 26)
+        self._mic_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mic_btn.setToolTip("Click to start/stop voice input")
+        self._mic_btn.mousePressEvent = lambda _: self._toggle_voice()
+        bar.addWidget(self._mic_btn)
+        bar.addSpacing(6)
 
         close_btn = QLabel("✕")
         close_btn.setFont(QFont(_FONT_UI, 13))
@@ -429,6 +500,88 @@ class SpotlightWindow(QWidget):
         outer.addWidget(card)
         return dlg.exec() == QDialog.DialogCode.Accepted
 
+    # ── Voice input ────────────────────────────────────────────────────────────
+
+    def _set_mic(self, emoji: str, placeholder: str | None = None) -> None:
+        self._mic_btn.setText(emoji)
+        if placeholder is not None:
+            self._input.setPlaceholderText(placeholder)
+        else:
+            self._set_placeholder()
+
+    def _toggle_voice(self) -> None:
+        if self._recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _start_recording(self) -> None:
+        try:
+            import sounddevice as sd
+        except ImportError:
+            self._on_voice_error("sounddevice not installed. Run: pip install sounddevice soundfile")
+            return
+
+        try:
+            self._recording  = True
+            self._rec_frames = []
+            self._set_mic("🔴", "Listening…  (click 🔴 to stop)")
+
+            def _cb(indata, frames, time, status):  # noqa: ARG001
+                if self._recording:
+                    self._rec_frames.append(indata.copy())
+
+            self._rec_stream = sd.InputStream(
+                samplerate=self._sample_rate, channels=1,
+                dtype="float32", callback=_cb,
+            )
+            self._rec_stream.start()
+        except Exception as exc:
+            self._recording = False
+            self._set_mic("🎙")
+            self._on_voice_error(str(exc))
+
+    def _stop_recording(self) -> None:
+        self._recording = False
+        if self._rec_stream:
+            try:
+                self._rec_stream.stop()
+                self._rec_stream.close()
+            except Exception:
+                pass
+            self._rec_stream = None
+
+        if not self._rec_frames:
+            self._set_mic("🎙")
+            return
+
+        self._set_mic("⏳", "Transcribing…")
+
+        self._voice_worker = _VoiceWorker(self._rec_frames, self._sample_rate)
+        self._voice_thread = QThread()
+        self._voice_worker.moveToThread(self._voice_thread)
+        self._voice_thread.started.connect(self._voice_worker.run)
+        self._voice_worker.transcribed.connect(self._on_transcribed)
+        self._voice_worker.error.connect(self._on_voice_error)
+        self._voice_worker.transcribed.connect(self._voice_thread.quit)
+        self._voice_worker.error.connect(self._voice_thread.quit)
+        self._voice_thread.start()
+
+    def _on_transcribed(self, text: str) -> None:
+        self._set_mic("🎙")
+        self._input.setText(text)
+        self._input.setFocus()
+
+    def _on_voice_error(self, msg: str) -> None:
+        self._set_mic("🎙")
+        print(f"[voice] {msg}", flush=True)
+        self._expand()
+        cursor = self._text.textCursor()
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(_RED))
+        cursor.insertText(f"⚠  Voice error: {msg}\n", fmt)
+        self._text.setTextCursor(cursor)
+
     # ── Spinner ────────────────────────────────────────────────────────────────
 
     def _start_spinner(self) -> None:
@@ -482,5 +635,8 @@ def run() -> None:
     win = SpotlightWindow(client, model)
     win.show()
     win._input.setFocus()
+
+    # Pre-load Whisper model in background so first mic click is instant
+    threading.Thread(target=_get_whisper_model, daemon=True).start()
 
     sys.exit(app.exec())
