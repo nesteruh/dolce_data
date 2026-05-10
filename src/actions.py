@@ -137,9 +137,24 @@ def _macos_wifi_iface() -> str:
 # ── Shell & app ──────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fix_killall_quoting(cmd: str) -> str:
+    """
+    Fix unquoted multi-word process names in killall commands.
+    e.g. 'killall Google Chrome' → 'killall "Google Chrome"'
+    """
+    m = re.match(r'^(killall\s+(?:-\w+\s+)*)([^"\'][^\s].+\s.+)$', cmd.strip())
+    if m:
+        prefix, name = m.group(1), m.group(2).strip()
+        # Only requote if the name has spaces and isn't already quoted
+        if ' ' in name and not (name.startswith('"') or name.startswith("'")):
+            return f'{prefix}"{name}"'
+    return cmd
+
+
 @action("shell", label="$ Shell command", risk="MEDIUM")
 def _shell(os_name: str, payload: str) -> tuple[bool, str, str]:
-    r = subprocess.run(payload, shell=True, capture_output=True,
+    cmd = _fix_killall_quoting(payload)
+    r = subprocess.run(cmd, shell=True, capture_output=True,
                        text=True, timeout=60)
     out = (r.stdout + "\n" + r.stderr).strip()
     if r.returncode == 0:

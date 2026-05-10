@@ -356,6 +356,11 @@ _HEALTH_SYSTEM = _SYSTEM_BASE + textwrap.dedent("""\
     why the system feels slow, and what they can safely do to improve performance.
     When suggesting to terminate a process, always include the process name and
     a brief explanation of what it does so the user can make an informed decision.
+
+    CRITICAL: If the user explicitly names a specific app or process to kill/quit
+    (e.g. "kill Google Chrome", "quit Safari"), target EXACTLY that app — do NOT
+    substitute a different process even if it has higher CPU or RAM usage.
+    Use ACTION_kill_process with the exact name the user mentioned.
 """)
 
 
@@ -754,8 +759,8 @@ def run_file_agent(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_AGENT_SYSTEM = textwrap.dedent("""\
-    You are a system settings assistant. The user wants to change one or more
-    system settings. For each change requested, output exactly:
+    You are a system settings and process management assistant. The user wants to
+    change system settings or manage running processes. For each action, output:
 
       SUGGESTION [RISK:<LOW|MEDIUM|HIGH>]: <plain-English description>
       ACTION_<type>: <payload>
@@ -775,11 +780,23 @@ _SYSTEM_AGENT_SYSTEM = textwrap.dedent("""\
       empty_trash            (empty)
       send_notification      Title | body message
       open_app               app name
+      kill_process           ONLY the process/app name — e.g. "Google Chrome"
+      force_quit_app         ONLY the process/app name — e.g. "Google Chrome"
+      restart_process        ONLY the process/app name — e.g. "Finder"
       shell                  exact shell command string
 
+    CRITICAL payload rules:
+    - kill_process / force_quit_app / restart_process: payload is the app or process
+      name ONLY — never include verbs like "kill", "quit", or "terminate".
+      Example: "Google Chrome", NOT "kill Google Chrome".
+    - Use kill_process for graceful quit; use force_quit_app when the user says
+      "force quit" or "force kill".
+    - On macOS, if using shell for killall, always quote multi-word names:
+      killall "Google Chrome", NOT killall Google Chrome.
+
     Rules:
-    - One SUGGESTION + one ACTION per setting change. No prose, no extra sections.
-    - Risk is LOW for all settings changes unless they cause data loss (HIGH).
+    - One SUGGESTION + one ACTION per action. No prose, no extra sections.
+    - Risk: LOW for settings, MEDIUM for kill_process, HIGH for force_quit_app.
 """)
 
 

@@ -3,7 +3,11 @@
     "allow": [
       "Bash(Get-Content \"c:\\\\projc\\\\hackaton\\\\dolce_data\\\\src\\\\collectors.py\")",
       "Bash(Measure-Object -Line)",
-      "PowerShell(\\(Get-Content \"c:\\\\projc\\\\hackaton\\\\dolce_data\\\\src\\\\collectors.py\"\\).Count)"
+      "PowerShell(\\(Get-Content \"c:\\\\projc\\\\hackaton\\\\dolce_data\\\\src\\\\collectors.py\"\\).Count)",
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(python -c \"import tkinter; print\\('tkinter OK:', tkinter.TkVersion\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(.venv/bin/pip install *)"
     ]
   }
 }

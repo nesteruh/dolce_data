@@ -118,6 +118,14 @@ _SYSTEM_CONTROLLABLES = {
     "do not disturb", "dnd", "trash", "notification",
 }
 
+# Verbs that indicate a user wants to kill/quit a specific process or app
+_KILL_VERBS = {
+    "kill", "force quit", "force-quit", "force_quit",
+    "terminate", "quit app", "quit application", "close app",
+    "close application", "end process", "kill process",
+    "kill the", "quit the", "close the",
+}
+
 
 def _has_system_action_intent(lower: str) -> bool:
     """Return True when the prompt looks like a system-settings action command."""
@@ -128,6 +136,11 @@ def _has_system_action_intent(lower: str) -> bool:
             if noun in lower:
                 return True
     return False
+
+
+def _has_kill_intent(lower: str) -> bool:
+    """Return True when the prompt is asking to kill/quit a specific process or app."""
+    return any(kw in lower for kw in _KILL_VERBS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,7 +164,7 @@ def _classify(prompt: str) -> list[str]:
 
     if scores.get("file", 0) >= 1:
         return ["file"]
-    if scores.get("system", 0) >= 1 or _has_system_action_intent(lower):
+    if scores.get("system", 0) >= 1 or _has_system_action_intent(lower) or _has_kill_intent(lower):
         return ["system"]
 
     matched = [d for d, s in scores.items() if s >= 1 and d not in ("file", "system")]
