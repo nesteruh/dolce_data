@@ -27,6 +27,15 @@ OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_API_KEY: str  = os.getenv("OLLAMA_API_KEY",  "ollama")
 SNIPPET_MODEL: str   = os.getenv("AGENT_MODEL",     "llama3.2")
 
+# ── Pre-computed intelligence (summarization + PII detection at index time) ────
+# Model used for summarization and PII detection. Defaults to the same LLM
+# used for reranking/snippets, but can be overridden independently.
+SUMMARIZER_MODEL: str  = os.getenv("SUMMARIZER_MODEL", SNIPPET_MODEL)
+# Max characters of document text sent to the LLM for summarization.
+SUMMARY_MAX_CHARS: int = 4000
+# Max characters sent to the LLM for PII detection (slightly wider window).
+PII_MAX_CHARS: int     = 6000
+
 # ── Chunking ──────────────────────────────────────────────────────────────────
 CHILD_CHUNK_SIZE: int = 1200   # chars (~300 tokens)
 CHILD_OVERLAP: int    = 200

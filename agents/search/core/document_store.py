@@ -16,6 +16,8 @@ Schema (table: documents)
     parent_folder   TEXT              -- immediate parent directory name
     full_text       TEXT              -- complete extracted text
     indexed_at      TEXT              -- ISO-8601 of last index run
+    summary         TEXT              -- 2-sentence LLM summary (pre-computed)
+    pii_flag        INTEGER           -- 1 if PII detected, 0 otherwise
 """
 
 import hashlib
@@ -39,7 +41,9 @@ CREATE TABLE IF NOT EXISTS documents (
     modified_date   TEXT NOT NULL DEFAULT '',
     parent_folder   TEXT NOT NULL DEFAULT '',
     full_text       TEXT NOT NULL DEFAULT '',
-    indexed_at      TEXT NOT NULL DEFAULT ''
+    indexed_at      TEXT NOT NULL DEFAULT '',
+    summary         TEXT NOT NULL DEFAULT '',
+    pii_flag        INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -81,6 +85,8 @@ class DocumentStore:
 
         Required keys in `doc`: file_path, file_name, file_extension,
         file_size, creation_date, modified_date, parent_folder, full_text.
+
+        Optional keys: summary (str), pii_flag (bool/int).
         """
         doc_id = _make_doc_id(doc["file_path"])
         with self._connect() as conn:
@@ -89,8 +95,9 @@ class DocumentStore:
                 INSERT INTO documents
                     (doc_id, file_path, file_name, file_extension,
                      file_size, creation_date, modified_date,
-                     parent_folder, full_text, indexed_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                     parent_folder, full_text, indexed_at,
+                     summary, pii_flag)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(doc_id) DO UPDATE SET
                     file_path=excluded.file_path,
                     file_name=excluded.file_name,
@@ -100,7 +107,9 @@ class DocumentStore:
                     modified_date=excluded.modified_date,
                     parent_folder=excluded.parent_folder,
                     full_text=excluded.full_text,
-                    indexed_at=excluded.indexed_at
+                    indexed_at=excluded.indexed_at,
+                    summary=excluded.summary,
+                    pii_flag=excluded.pii_flag
                 """,
                 (
                     doc_id,
@@ -113,6 +122,8 @@ class DocumentStore:
                     str(doc.get("parent_folder", "")),
                     str(doc.get("full_text", "")),
                     _now_iso(),
+                    str(doc.get("summary", "")),
+                    int(bool(doc.get("pii_flag", False))),
                 ),
             )
         return doc_id
@@ -134,6 +145,14 @@ class DocumentStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_document_by_path(self, file_path: str) -> dict | None:
+        """
+        Fetch a document record by its absolute file path.
+        Returns None if the file has not been indexed yet.
+        """
+        doc_id = _make_doc_id(file_path)
+        return self.get_document(doc_id)
+
     def get_doc_id(self, file_path: str) -> str | None:
         """Return the doc_id for a given file_path, or None if not indexed."""
         doc_id = _make_doc_id(file_path)
@@ -147,13 +166,28 @@ class DocumentStore:
         """
         Return all documents as lightweight dicts for BM25 corpus building.
         Each dict: {doc_id, file_path, file_name, file_extension,
-                    parent_folder, file_size, creation_date, full_text}
+                    parent_folder, file_size, creation_date, full_text,
+                    summary, pii_flag}
         """
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT doc_id, file_path, file_name, file_extension,
-                          parent_folder, file_size, creation_date, full_text
+                          parent_folder, file_size, creation_date, full_text,
+                          summary, pii_flag
                    FROM documents"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_paths(self) -> list[dict]:
+        """
+        Return a lightweight list of all indexed files.
+        Each dict: {doc_id, file_path, file_name, file_extension}
+
+        Used by fast_filename_search() when no folder_path is provided.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT doc_id, file_path, file_name, file_extension FROM documents"
             ).fetchall()
         return [dict(r) for r in rows]
 
