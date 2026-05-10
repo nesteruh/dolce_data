@@ -142,12 +142,21 @@ def _shell(os_name: str, payload: str) -> tuple[bool, str, str]:
     r = subprocess.run(payload, shell=True, capture_output=True,
                        text=True, timeout=60)
     out = (r.stdout + "\n" + r.stderr).strip()
-    return r.returncode == 0, out, ""
+    if r.returncode == 0:
+        return True, out or "Done", ""
+    return False, "", out or f"Command failed (exit {r.returncode}): {payload}"
 
 
 @action("open_app", label="⌘  Open app", risk="LOW")
 def _open_app(os_name: str, payload: str) -> tuple[bool, str, str]:
     app = payload.strip()
+    # Take only the first semicolon-separated item if LLM chained multiple apps
+    app = app.split(";")[0].strip()
+    # Strip "open_app", "openapp", "open " prefixes the LLM sometimes prepends
+    for prefix in ("open_app ", "openapp ", "open app ", "open "):
+        if app.lower().startswith(prefix):
+            app = app[len(prefix):].strip()
+            break
     if os_name == "macos":
         return _sh(["open", "-a", app])
     if os_name == "linux":
@@ -181,11 +190,18 @@ def _open_file(os_name: str, payload: str) -> tuple[bool, str, str]:
 
 def _find_procs(payload: str) -> list[psutil.Process]:
     """Return processes matching a PID (int) or name substring."""
+    name = payload.strip()
+    # Strip LLM-generated verb prefixes — e.g. "force quit Google Chrome" → "Google Chrome"
+    for prefix in ("force quit ", "force-quit ", "force_quit ", "terminate ",
+                   "kill ", "quit ", "close ", "stop "):
+        if name.lower().startswith(prefix):
+            name = name[len(prefix):]
+            break
     try:
-        return [psutil.Process(int(payload))]
+        return [psutil.Process(int(name))]
     except ValueError:
         pass
-    name_lower = payload.lower()
+    name_lower = name.lower()
     found = []
     for p in psutil.process_iter(["name", "pid"]):
         try:
