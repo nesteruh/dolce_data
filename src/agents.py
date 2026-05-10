@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from openai import OpenAI
@@ -142,6 +143,298 @@ def _parse_agent_json(data: dict) -> tuple[list[str], list[str]]:
             suggestions.append(text)
             risks.append(risk)
     return suggestions, risks
+
+
+def _trim_routing_table(table: str, max_ipv4: int = 10) -> str:
+    """Reduce a verbose routing table to the entries useful for LLM diagnosis.
+
+    Keeps: section headers, default gateway, host /32, and up to max_ipv4 other
+    IPv4 entries. Drops the IPv6 block entirely — it adds tokens without aiding
+    network diagnostics for typical user queries.
+    """
+    lines = table.splitlines()
+    kept: list[str] = []
+    ipv4_count = 0
+    in_ipv6 = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped in ("Routing tables", "Internet:", "Internet6:"):
+            if stripped == "Internet6:":
+                in_ipv6 = True
+            kept.append(line)
+            continue
+        if in_ipv6:
+            continue
+        if stripped.startswith("Destination"):
+            kept.append(line)
+            continue
+        if line.startswith("default") or "/32" in line:
+            kept.append(line)
+            continue
+        if ipv4_count < max_ipv4:
+            kept.append(line)
+            ipv4_count += 1
+    header_prefixes = ("Routing", "Internet", "Destination")
+    total = sum(1 for l in lines if l.strip() and not l.strip().startswith(header_prefixes))
+    shown = sum(1 for l in kept if l.strip() and not l.strip().startswith(header_prefixes))
+    if total > shown:
+        kept.append(f"  … {total - shown} more entries omitted")
+    return "\n".join(kept)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fast-report helpers (zero-LLM structured parsing + scoring)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_cpu_table(text: str) -> list[tuple[str, float]]:
+    """Parse fixed-width CPU process table → list of (name, cpu_pct)."""
+    result = []
+    for line in text.strip().splitlines()[1:]:
+        if len(line) < 52:
+            continue
+        name = line[8:43].strip()
+        try:
+            result.append((name, float(line[43:51].strip())))
+        except ValueError:
+            pass
+    return result
+
+
+def _parse_ram_table(text: str) -> list[tuple[str, float]]:
+    """Parse fixed-width RAM process table → list of (name, rss_mb)."""
+    result = []
+    for line in text.strip().splitlines()[1:]:
+        if len(line) < 50:
+            continue
+        name = line[8:43].strip()
+        try:
+            rss_mb = float(line[43:57].strip().split()[0])
+            result.append((name, rss_mb))
+        except (ValueError, IndexError):
+            pass
+    return result
+
+
+def _parse_energy_table(text: str) -> list[tuple[str, float]]:
+    """Parse battery energy-consumer table → list of (name, cpu_pct)."""
+    result = []
+    for line in text.strip().splitlines()[1:]:
+        if len(line) < 37:
+            continue
+        name = line[:35].strip()
+        try:
+            result.append((name, float(line[35:].strip().rstrip('%'))))
+        except ValueError:
+            pass
+    return result
+
+
+def _parse_memory_overview(text: str) -> tuple[float, float, float, float]:
+    """Return (ram_used_gb, ram_total_gb, ram_pct, swap_pct) from memory_overview string."""
+    ram_used = ram_total = ram_pct = swap_pct = 0.0
+    for line in text.splitlines():
+        m = re.search(r"RAM:.*?(\d+\.?\d*)\s*GB used / (\d+\.?\d*)\s*GB total.*?\((\d+\.?\d*)%\)", line)
+        if m:
+            ram_used, ram_total, ram_pct = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        m = re.search(r"Swap:.*?\((\d+\.?\d*)%\)", line)
+        if m:
+            swap_pct = float(m.group(1))
+    return ram_used, ram_total, ram_pct, swap_pct
+
+
+def _parse_disk_usage(volumes: str) -> tuple[float, float, float] | None:
+    """Return (used_gb, total_gb, pct) for the first volume with data."""
+    for line in volumes.strip().splitlines()[1:]:
+        if len(line) < 53:
+            continue
+        try:
+            total_gb = float(line[16:28].strip().split()[0])
+            used_gb  = float(line[28:40].strip().split()[0])
+            pct      = float(line[52:].strip().rstrip('%'))
+            return used_gb, total_gb, pct
+        except (ValueError, IndexError):
+            pass
+    return None
+
+
+def _parse_battery_status(text: str) -> tuple[float | None, bool]:
+    """Return (pct, is_charging) or (None, False) if no battery."""
+    m = re.match(r"(\d+\.?\d*)\s*%", text or "")
+    if not m:
+        return None, False
+    charging = "charging" in text.lower() and "not charging" not in text.lower()
+    return float(m.group(1)), charging
+
+
+def _parse_uptime_hours(text: str) -> float:
+    """Parse '507h 18m since last boot' → 507.3."""
+    m = re.match(r"(\d+)h\s+(\d+)m", text or "")
+    return int(m.group(1)) + int(m.group(2)) / 60 if m else 0.0
+
+
+def _score_cpu(cpu_pct: float) -> float:
+    """0–10 impact score. 50 % CPU → 10."""
+    return min(10.0, cpu_pct / 5.0)
+
+
+def _score_ram(rss_mb: float, total_ram_mb: float) -> float:
+    """0–10 impact score. 10 % of total RAM → 10."""
+    if total_ram_mb <= 0:
+        return 0.0
+    return min(10.0, rss_mb / (total_ram_mb * 0.1))
+
+
+def _impact_bar(score: float, width: int = 8) -> str:
+    filled = round(score / 10.0 * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _impact_level(score: float) -> str:
+    return "HIGH" if score >= 7.0 else ("MEDIUM" if score >= 4.0 else "LOW")
+
+
+def run_fast_report(
+    user_prompt: str,
+    client: OpenAI,
+    model: str,
+    os_name: str | None = None,
+    history: list[dict] | None = None,
+) -> "AgentResult":
+    """Instant health/battery/storage report — zero LLM calls.
+
+    Collects data from all three collectors in parallel, parses the structured
+    strings, computes per-process impact scores, and builds a rich Markdown
+    report. Typical wall-clock time: 3–5 s (data collection only).
+    """
+    os_name = os_name or detect_os()
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_h = ex.submit(collect_health,  os_name)
+        f_b = ex.submit(collect_battery, os_name)
+        f_s = ex.submit(collect_storage, os_name)
+
+    health  = f_h.result()
+    battery = f_b.result()
+    storage = f_s.result()
+
+    cpu_procs    = _parse_cpu_table(health.top_cpu_procs    or "")
+    ram_procs    = _parse_ram_table(health.top_mem_procs    or "")
+    energy_procs = _parse_energy_table(battery.energy_consumers or "")
+    ram_used, ram_total, ram_pct, swap_pct = _parse_memory_overview(health.memory_overview or "")
+    total_ram_mb = ram_total * 1024
+    disk_info    = _parse_disk_usage(storage.volumes or "")
+    bat_pct, bat_charging = _parse_battery_status(battery.quick_status or "")
+    uptime_h     = _parse_uptime_hours(health.uptime or "")
+
+    # ── Overall health score (10 = perfect, 0 = maxed out) ──────────────────
+    try:
+        load1 = float((health.load_avg or "0").split("/")[0].split("(")[0].strip())
+        cores = int((health.core_count or "1").split()[0])
+        load_score = min(10.0, (load1 / max(1, cores)) * 10)
+    except (ValueError, IndexError):
+        load_score = 0.0
+    stress = (load_score + ram_pct / 10.0 + swap_pct / 10.0) / 3.0
+    health_score = round(max(0.0, 10.0 - stress), 1)
+    health_label = "GOOD" if health_score >= 7 else ("MODERATE" if health_score >= 4 else "POOR")
+
+    lines: list[str] = []
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    uptime_str = f"{int(uptime_h)}h" if uptime_h else "unknown"
+    lines.append("## System Health Report\n")
+    lines.append(f"**Overall Status:** {health_label}  ·  Score: {health_score}/10  ·  Uptime: {uptime_str}\n")
+    lines.append("---")
+
+    # ── CPU ──────────────────────────────────────────────────────────────────
+    load_display = (health.load_avg or "—").split("(")[0].strip()
+    lines.append(f"\n### CPU  ·  Load: {load_display}\n")
+    lines.append("| Impact | Process | CPU% | Risk |")
+    lines.append("|--------|---------|------|------|")
+    for name, cpu in cpu_procs[:8]:
+        sc = _score_cpu(cpu)
+        lines.append(f"| `{_impact_bar(sc)}` | {name} | {cpu:.1f}% | **{_impact_level(sc)}** |")
+
+    # ── RAM ──────────────────────────────────────────────────────────────────
+    ram_status = _impact_level(ram_pct / 10.0)
+    lines.append(f"\n---\n\n### RAM  ·  {ram_used:.1f} GB / {ram_total:.1f} GB ({ram_pct:.1f}%)  ·  Swap: {swap_pct:.1f}%  ·  Risk: {ram_status}\n")
+    lines.append("| Impact | Process | RAM | % of Total | Risk |")
+    lines.append("|--------|---------|-----|-----------|------|")
+    for name, rss_mb in ram_procs[:8]:
+        sc = _score_ram(rss_mb, total_ram_mb)
+        pct_of_total = (rss_mb / total_ram_mb * 100) if total_ram_mb else 0.0
+        lines.append(f"| `{_impact_bar(sc)}` | {name} | {rss_mb:.0f} MB | {pct_of_total:.1f}% | **{_impact_level(sc)}** |")
+
+    # ── Storage ──────────────────────────────────────────────────────────────
+    lines.append("\n---\n\n### Storage\n")
+    if disk_info:
+        used_gb, total_gb, disk_pct = disk_info
+        disk_risk = _impact_level(disk_pct / 10.0)
+        lines.append(f"Disk: **{disk_pct:.1f}%** used — {used_gb:.1f} GB / {total_gb:.1f} GB  [{disk_risk}]")
+    else:
+        lines.append("_(no disk data)_")
+
+    # ── Battery ──────────────────────────────────────────────────────────────
+    lines.append("\n---\n\n### Battery\n")
+    if bat_pct is not None:
+        status_str = "Charging" if bat_charging else "Discharging"
+        lines.append(f"**{bat_pct:.0f}%** ({status_str})")
+        if energy_procs:
+            lines.append("\nTop energy consumers:\n")
+            for i, (name, cpu) in enumerate(energy_procs[:5], 1):
+                sc = _score_cpu(cpu)
+                lines.append(f"{i}. {name} — {cpu:.1f}% CPU [{_impact_level(sc)}]")
+    else:
+        lines.append("_(no battery / desktop system)_")
+
+    # ── Recommendations ──────────────────────────────────────────────────────
+    recs: list[tuple[str, str]] = []
+    seen_names: set[str] = set()
+    for name, cpu in cpu_procs[:5]:
+        sc = _score_cpu(cpu)
+        if sc >= 7 and name not in seen_names:
+            recs.append(("HIGH",   f"Stop **{name}** ({cpu:.1f}% CPU) when not needed — it is continuously consuming CPU"))
+            seen_names.add(name)
+        elif sc >= 4 and name not in seen_names and len(recs) < 6:
+            recs.append(("MEDIUM", f"Consider closing **{name}** ({cpu:.1f}% CPU) to reduce load"))
+            seen_names.add(name)
+    for name, rss_mb in ram_procs[:3]:
+        sc = _score_ram(rss_mb, total_ram_mb)
+        if sc >= 7 and name not in seen_names:
+            recs.append(("HIGH",   f"**{name}** uses {rss_mb:.0f} MB RAM — close if not actively needed"))
+            seen_names.add(name)
+    if swap_pct > 80:
+        recs.append(("MEDIUM", f"Swap at {swap_pct:.1f}% — restarting memory-heavy apps will relieve pressure"))
+    if disk_info and disk_info[2] > 85:
+        recs.append(("HIGH",   f"Disk at {disk_info[2]:.1f}% — free up space to avoid slowdowns"))
+    elif disk_info and disk_info[2] > 70:
+        recs.append(("LOW",    f"Disk at {disk_info[2]:.1f}% — consider cleaning up large files"))
+    if bat_pct is not None and bat_pct < 20 and not bat_charging:
+        recs.append(("HIGH",   "Battery below 20% — plug in charger"))
+    if uptime_h > 168:
+        recs.append(("LOW",    f"Running for {int(uptime_h)}h — a restart clears swap and refreshes system state"))
+    elif uptime_h > 72:
+        recs.append(("LOW",    f"Running for {int(uptime_h)}h — consider a restart to clear accumulated swap"))
+
+    if recs:
+        lines.append("\n---\n\n### Recommendations\n")
+        for i, (risk, text) in enumerate(recs[:8], 1):
+            lines.append(f"{i}. **[{risk}]** {text}")
+
+    full_response = "\n".join(lines)
+
+    return AgentResult(
+        agent="FastReport",
+        raw_data_summary=(
+            f"Fast report — collected health + battery + storage in parallel\n"
+            f"CPU processes: {len(cpu_procs)}  RAM processes: {len(ram_procs)}  "
+            f"Battery: {f'{bat_pct:.0f}%' if bat_pct is not None else 'N/A'}  "
+            f"Disk: {f'{disk_info[2]:.1f}%' if disk_info else 'N/A'}"
+        ),
+        analysis="",
+        suggestions=[text for _, text in recs[:8]],
+        risk_levels=[risk for risk, _ in recs[:8]],
+        full_response=full_response,
+    )
 
 
 def _format_full_response(data: dict, fallback: str = "") -> str:
@@ -508,11 +801,51 @@ def run_network_agent(
         {data.bandwidth or '(no data)'}
     """)
 
+    llm_routing = _trim_routing_table(data.routing_table or "(no data)")
+
+    llm_summary = textwrap.dedent(f"""\
+        OS: {os_name}
+
+        === NETWORK INTERFACES ===
+        {data.interfaces or '(no data)'}
+
+        === ROUTING TABLE (summarised) ===
+        {llm_routing}
+
+        === WIFI STATUS ===
+        {data.wifi_status or '(not applicable)'}
+
+        === DNS CONFIGURATION ===
+        {data.dns_config or '(no data)'}
+
+        === FIREWALL STATUS ===
+        {data.firewall_status or '(no data)'}
+        {data.firewall_apps or ''}
+        {data.firewall_iptables or ''}
+        {data.firewall_rules or ''}
+
+        === VPN / TUNNEL DETECTION ===
+        {data.vpn_detection or '(none detected)'}
+
+        === PROXY CONFIGURATION ===
+        {data.proxy_config or '(not applicable)'}
+
+        === ACTIVE CONNECTIONS (with processes) ===
+        {data.active_connections or '(no data)'}
+        {data.connections_named or ''}
+
+        === LISTENING PORTS ===
+        {data.listening_ports or '(no data)'}
+
+        === BANDWIDTH BY PROCESS / ADAPTER ===
+        {data.bandwidth or '(no data)'}
+    """)
+
     user_msg = textwrap.dedent(f"""\
         The user asked: "{user_prompt}"
 
         Here is the real network data collected from this machine right now:
-        {raw_summary}
+        {llm_summary}
 
         Diagnose the network situation based solely on this data. Identify which
         processes are using the most connections or bandwidth, whether the firewall
