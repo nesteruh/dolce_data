@@ -8,3 +8,4 @@ markitdown[all]
 PyMuPDF
 python-docx
 watchdog
+rapidfuzz
