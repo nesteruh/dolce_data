@@ -1197,3 +1197,106 @@ def collect_user_activity(os_name: str) -> UserActivityData:
         data.last_logins   = f_logins.result()
 
     return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fast-report data collector (psutil only — no shell commands, ~1 s total)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class FastReportData:
+    top_cpu:      list[tuple[str, float]] = field(default_factory=list)  # (name, cpu_pct)
+    top_ram:      list[tuple[str, float]] = field(default_factory=list)  # (name, rss_mb)
+    ram_used_gb:  float = 0.0
+    ram_total_gb: float = 0.0
+    ram_pct:      float = 0.0
+    swap_pct:     float = 0.0
+    load1:        float = 0.0
+    load_avg_str: str   = ""
+    cpu_cores:    int   = 1
+    bat_pct:      float | None = None
+    bat_charging: bool  = False
+    disk_used_gb: float = 0.0
+    disk_total_gb: float = 0.0
+    disk_pct:     float = 0.0
+    uptime_h:     float = 0.0
+
+
+def collect_fast_report_data() -> FastReportData:
+    """Collect only what the fast report needs, using psutil with no shell commands.
+
+    One 1-second sleep for CPU sampling is unavoidable; everything else is instant.
+    Total wall-clock time: ~1–2 s.
+    """
+    d = FastReportData()
+
+    # ── CPU cores & load ─────────────────────────────────────────────────────
+    d.cpu_cores = psutil.cpu_count(logical=True) or 1
+    try:
+        la = psutil.getloadavg()
+        d.load1 = la[0]
+        d.load_avg_str = f"{la[0]:.2f} / {la[1]:.2f} / {la[2]:.2f}"
+    except AttributeError:
+        d.load1 = 0.0
+        d.load_avg_str = "N/A"
+
+    # ── CPU sampling (single 1-second pass shared with RAM scan) ─────────────
+    primed: list[tuple[psutil.Process, str]] = []
+    ram_snapshot: list[tuple[str, float]] = []
+
+    for p in psutil.process_iter(["name", "memory_info"]):
+        try:
+            p.cpu_percent(interval=None)          # prime for next read
+            name = (p.info.get("name") or "?")[:34]
+            primed.append((p, name))
+            rss_mb = (p.info["memory_info"].rss if p.info["memory_info"] else 0) / 1024 ** 2
+            ram_snapshot.append((name, rss_mb))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    time.sleep(1.0)                               # one shared sleep
+
+    cpu_snapshot: list[tuple[str, float]] = []
+    for p, name in primed:
+        try:
+            cpu = p.cpu_percent(interval=None)
+            cpu_snapshot.append((name, cpu))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    cpu_snapshot.sort(key=lambda x: x[1], reverse=True)
+    ram_snapshot.sort(key=lambda x: x[1], reverse=True)
+    d.top_cpu = cpu_snapshot[:10]
+    d.top_ram = ram_snapshot[:10]
+
+    # ── Memory ───────────────────────────────────────────────────────────────
+    vm = psutil.virtual_memory()
+    sm = psutil.swap_memory()
+    d.ram_used_gb  = vm.used  / 1024 ** 3
+    d.ram_total_gb = vm.total / 1024 ** 3
+    d.ram_pct      = vm.percent
+    d.swap_pct     = sm.percent
+
+    # ── Battery ──────────────────────────────────────────────────────────────
+    try:
+        bat = psutil.sensors_battery()
+        if bat:
+            d.bat_pct      = bat.percent
+            d.bat_charging = bool(bat.power_plugged)
+    except Exception:
+        pass
+
+    # ── Disk (root / home partition) ─────────────────────────────────────────
+    try:
+        disk = psutil.disk_usage(str(Path.home()))
+        d.disk_used_gb  = disk.used  / 1024 ** 3
+        d.disk_total_gb = disk.total / 1024 ** 3
+        d.disk_pct      = disk.percent
+    except Exception:
+        pass
+
+    # ── Uptime ───────────────────────────────────────────────────────────────
+    d.uptime_h = (time.time() - psutil.boot_time()) / 3600
+
+    return d
+
