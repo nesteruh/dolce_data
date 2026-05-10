@@ -92,20 +92,44 @@ _SYSTEM_BASE = textwrap.dedent("""\
 """)
 
 
-def _llm_call(client: OpenAI, model: str, system: str, user: str, json_mode: bool = True) -> str:
+def _llm_call(
+    client: OpenAI,
+    model: str,
+    system: str,
+    user: str,
+    json_mode: bool = True,
+    on_token=None,
+) -> str:
     kwargs: dict = {}
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    response = client.chat.completions.create(
+    if on_token is None:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.3,
+            **kwargs,
+        )
+        return response.choices[0].message.content or ""
+    # Streaming path — json_mode ignored (all diagnostic agents use json_mode=False).
+    chunks: list[str] = []
+    for chunk in client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         temperature=0.3,
-        **kwargs,
-    )
-    return response.choices[0].message.content or ""
+        stream=True,
+    ):
+        delta = chunk.choices[0].delta.content or ""
+        if delta:
+            chunks.append(delta)
+            on_token(delta)
+    return "".join(chunks)
 
 
 def _parse_suggestions(text: str) -> tuple[list[str], list[str]]:
@@ -160,6 +184,7 @@ def run_storage_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     stale_months = _parse_months(user_prompt)
@@ -222,7 +247,7 @@ def run_storage_agent(
            those require manual judgment before deleting.
     """)
 
-    llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _STORAGE_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 
@@ -267,6 +292,7 @@ def run_battery_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: BatteryData = collect_battery(os_name)
@@ -304,7 +330,7 @@ def run_battery_agent(
         Answer the user's specific question using only the data above.
     """)
 
-    llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _BATTERY_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 
@@ -338,6 +364,7 @@ def run_health_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: HealthData = collect_health(os_name)
@@ -381,7 +408,7 @@ def run_health_agent(
         Answer the user's specific question using only the data above.
     """)
 
-    llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _HEALTH_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 
@@ -422,6 +449,7 @@ def run_network_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: NetworkData = collect_network(os_name)
@@ -477,7 +505,7 @@ def run_network_agent(
         suggestions. Use the SUGGESTION format for each action.
     """)
 
-    llm_text = _llm_call(client, model, _NETWORK_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _NETWORK_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 
@@ -518,6 +546,7 @@ def run_startup_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: StartupData = collect_startup(os_name)
@@ -560,7 +589,7 @@ def run_startup_agent(
         Give specific, safe suggestions. Use the SUGGESTION format for each action.
     """)
 
-    llm_text = _llm_call(client, model, _STARTUP_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _STARTUP_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 
@@ -596,6 +625,7 @@ def run_activity_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     data: UserActivityData = collect_user_activity(os_name)
@@ -629,7 +659,7 @@ def run_activity_agent(
         4. Provide suggestions only if they are directly supported by the data shown above.
     """)
 
-    llm_text = _llm_call(client, model, _ACTIVITY_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _ACTIVITY_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 
@@ -683,6 +713,7 @@ def run_file_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
     ctx: FileContextData = collect_file_context(os_name)
@@ -703,7 +734,7 @@ def run_file_agent(
         {context_str}
     """)
 
-    llm_text = _llm_call(client, model, _FILE_AGENT_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _FILE_AGENT_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 
@@ -757,12 +788,13 @@ def run_system_agent(
     client: OpenAI,
     model: str,
     os_name: str | None = None,
+    on_token=None,
 ) -> AgentResult:
     os_name = os_name or detect_os()
 
     user_msg = f'The user asked: "{user_prompt}"\n\nOS: {os_name}'
 
-    llm_text = _llm_call(client, model, _SYSTEM_AGENT_SYSTEM, user_msg, json_mode=False)
+    llm_text = _llm_call(client, model, _SYSTEM_AGENT_SYSTEM, user_msg, json_mode=False, on_token=on_token)
     suggestions, risks = _parse_suggestions(llm_text)
     actions = parse_actions(llm_text, suggestions, risks)
 

@@ -10,16 +10,41 @@ Subprocess is used only where Python has no equivalent:
 from __future__ import annotations
 
 import datetime
+import functools
 import os
 import platform
 import subprocess
 import sys
+import threading as _threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import psutil
+
+# ── TTL cache for collect_* functions ────────────────────────────────────────
+_COLLECT_CACHE: dict = {}
+_CACHE_TTL = 60.0  # seconds
+_CACHE_LOCK = _threading.Lock()
+
+
+def _ttl_cache(fn):
+    """60-second TTL in-process cache for collect_* functions."""
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        key = (fn.__name__,) + args + tuple(sorted(kwargs.items()))
+        now = time.time()
+        with _CACHE_LOCK:
+            if key in _COLLECT_CACHE:
+                ts, val = _COLLECT_CACHE[key]
+                if now - ts < _CACHE_TTL:
+                    return val
+        val = fn(*args, **kwargs)
+        with _CACHE_LOCK:
+            _COLLECT_CACHE[key] = (now, val)
+        return val
+    return _wrapper
 
 
 def detect_os() -> str:
@@ -200,7 +225,12 @@ class StorageData:
     stale_files: str = ""                                # large files not modified in 6+ months
 
 
-_SKIP_DIR_SCAN = {"AppData", "Library", ".cache"}
+_SKIP_DIR_SCAN = {
+    "AppData", "Library", ".cache",
+    "node_modules", ".git", "venv", ".venv",
+    "__pycache__", "target", ".gradle", ".tox",
+    "dist", "build", ".next", ".nuxt",
+}
 
 
 def _volumes() -> str:
@@ -294,25 +324,37 @@ def _stale_large_files(min_size_mb: int = 50, months: int = 6) -> str:
     results: list[tuple[str, int, float]] = []
 
     def _scan(path: Path, depth: int) -> None:
-        if depth > 5:
+        if depth > 3:
             return
         try:
-            for entry in os.scandir(path):
+            entries = list(os.scandir(path))
+        except (PermissionError, OSError):
+            return
+        if len(entries) > 500:
+            # Flat-explosion guard: check files only, skip recursion
+            for entry in entries:
                 try:
-                    if entry.is_symlink():
-                        continue
-                    if depth == 0 and entry.name in _SKIP_DIR_SCAN:
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        _scan(Path(entry.path), depth + 1)
-                    elif entry.is_file(follow_symlinks=False):
+                    if entry.is_file(follow_symlinks=False):
                         st = entry.stat(follow_symlinks=False)
                         if st.st_size >= min_size and st.st_mtime < cutoff:
                             results.append((entry.path, st.st_size, st.st_mtime))
                 except (PermissionError, OSError):
                     pass
-        except (PermissionError, OSError):
-            pass
+            return
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.name in _SKIP_DIR_SCAN:  # skip at any depth, not just root
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    _scan(Path(entry.path), depth + 1)
+                elif entry.is_file(follow_symlinks=False):
+                    st = entry.stat(follow_symlinks=False)
+                    if st.st_size >= min_size and st.st_mtime < cutoff:
+                        results.append((entry.path, st.st_size, st.st_mtime))
+            except (PermissionError, OSError):
+                pass
 
     _scan(Path.home(), 0)
 
@@ -334,6 +376,7 @@ def _stale_large_files(min_size_mb: int = 50, months: int = 6) -> str:
     return "\n".join(lines)
 
 
+@_ttl_cache
 def collect_storage(os_name: str, stale_months: int = 6) -> StorageData:
     data = StorageData(os_name=os_name)
 
@@ -414,7 +457,7 @@ def _energy_consumers() -> str:
             primed.append((p, p.info.get("name") or "?"))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    time.sleep(0.8)
+    time.sleep(0.3)
     procs = []
     for p, name in primed:
         try:
@@ -431,33 +474,38 @@ def _energy_consumers() -> str:
 
 
 def _macos_energy_impact() -> str:
-    """Per-process Energy Impact from macOS top — mirrors Activity Monitor's Energy column."""
-    raw = _sh(["top", "-l", "2", "-o", "power", "-n", "10"], timeout=15)
-    if raw.startswith("ERROR"):
-        return raw
-
-    # top -l 2 outputs two full samples; split on the repeated "Processes:" header
-    parts = raw.split("Processes:")
-    block = ("Processes:" + parts[-1]) if len(parts) > 1 else raw
-
-    lines: list[str] = []
-    in_table = False
-    for line in block.splitlines():
-        stripped = line.strip()
-        if not in_table and "PID" in stripped and "COMMAND" in stripped:
-            in_table = True
-            lines.append(f"{'Process':<35} {'CPU%':<8} Energy Impact")
-            continue
-        if in_table and stripped:
-            lines.append(stripped)
-
-    return "\n".join(lines) if lines else "(no energy impact data)"
+    """Per-process energy impact via psutil CPU% — avoids the 4-15s `top -l 2` wait."""
+    snapshot: list[tuple[str, float]] = []
+    for p in psutil.process_iter(["pid", "name", "cpu_percent"]):
+        try:
+            cpu = p.info["cpu_percent"] or 0.0
+            if cpu > 0:
+                snapshot.append((p.info["name"] or "?", cpu))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    if not snapshot:
+        # _energy_consumers() runs concurrently and primes cpu_percent(); if it
+        # hasn't fired yet, wait 0.3s and sample once more.
+        time.sleep(0.3)
+        for p in psutil.process_iter(["pid", "name", "cpu_percent"]):
+            try:
+                cpu = p.info["cpu_percent"] or 0.0
+                if cpu > 0:
+                    snapshot.append((p.info["name"] or "?", cpu))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    snapshot.sort(key=lambda x: x[1], reverse=True)
+    lines = [f"{'Process':<35} {'CPU%':<8} Energy Impact"]
+    for name, cpu in snapshot[:10]:
+        impact = "Very High" if cpu > 50 else "High" if cpu > 20 else "Medium" if cpu > 5 else "Low"
+        lines.append(f"{name[:34]:<35} {cpu:<8.1f} {impact}")
+    return "\n".join(lines) if len(lines) > 1 else "(no energy impact data)"
 
 
 def _macos_battery_drain_history() -> str:
     """Last ~1 hour of battery drain events from pmset log (no sudo needed)."""
     from datetime import datetime as _dt, timedelta, timezone
-    raw = _sh(["pmset", "-g", "log"], timeout=10)
+    raw = _sh(["pmset", "-g", "log"], timeout=5)
     if raw.startswith("ERROR"):
         return raw
 
@@ -545,6 +593,7 @@ def _macos_battery_health() -> str:
     ])
 
 
+@_ttl_cache
 def collect_battery(os_name: str) -> BatteryData:
     data = BatteryData(os_name=os_name)
 
@@ -555,7 +604,7 @@ def collect_battery(os_name: str) -> BatteryData:
             fqs   = ex.submit(_battery_quick_status)
             fhd   = ex.submit(_macos_battery_health)
             fps   = ex.submit(_sh, ["pmset", "-g"])
-            fbt   = ex.submit(_sh, ["system_profiler", "SPBluetoothDataType", "-detailLevel", "mini"])
+            fbt   = ex.submit(_sh, ["system_profiler", "SPBluetoothDataType", "-detailLevel", "mini"], 5)
             fwifi = ex.submit(_sh, ["networksetup", "-getairportnetwork", "en0"])
             fei   = ex.submit(_macos_energy_impact)
             fdh   = ex.submit(_macos_battery_drain_history)
@@ -651,7 +700,7 @@ def _sample_cpu_procs(top_n: int = 15) -> str:
             primed.append((p, p.info.get("name") or "?", p.info.get("username") or ""))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-    time.sleep(1.0)
+    time.sleep(0.3)
     procs = []
     for p, name, user in primed:
         try:
@@ -750,6 +799,7 @@ def _temperatures_linux() -> str:
         return "(not supported on this platform)"
 
 
+@_ttl_cache
 def collect_health(os_name: str) -> HealthData:
     data = HealthData(os_name=os_name)
 
@@ -898,6 +948,7 @@ def _net_vpn() -> str:
     )
 
 
+@_ttl_cache
 def collect_network(os_name: str) -> NetworkData:
     data = NetworkData(os_name=os_name)
 
@@ -930,7 +981,7 @@ def collect_network(os_name: str) -> NetworkData:
         elif os_name == "macos":
             f_route = ex.submit(_sh, ["netstat", "-rn"])
             f_dns   = ex.submit(_sh, ["scutil", "--dns"])
-            f_fw    = ex.submit(_sh, ["pfctl", "-s", "info"])
+            f_fw    = ex.submit(_sh, ["pfctl", "-s", "info"], 3)
             f_wifi  = ex.submit(_sh, [
                 "/System/Library/PrivateFrameworks/Apple80211.framework"
                 "/Versions/Current/Resources/airport", "-I"
@@ -987,6 +1038,7 @@ class StartupData:
     auto_services: str = ""     # Windows
 
 
+@_ttl_cache
 def collect_startup(os_name: str) -> StartupData:
     data = StartupData(os_name=os_name)
 
@@ -1171,6 +1223,7 @@ def _last_logins(os_name: str) -> str:
     return _sh(["last", "-n", "10"])
 
 
+@_ttl_cache
 def collect_user_activity(os_name: str) -> UserActivityData:
     data = UserActivityData(os_name=os_name)
 
