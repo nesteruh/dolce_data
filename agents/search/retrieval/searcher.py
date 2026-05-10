@@ -27,6 +27,8 @@ metadata_filter (optional):
         {"creation_date":  {"$gte": "2024-01-01"}}
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re

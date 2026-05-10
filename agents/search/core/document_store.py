@@ -20,6 +20,8 @@ Schema (table: documents)
     pii_flag        INTEGER           -- 1 if PII detected, 0 otherwise
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import sqlite3

@@ -11,6 +11,8 @@ Subcommands:
 Cross-platform: pathlib used throughout. Works on Windows, macOS, Linux.
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys

@@ -13,6 +13,8 @@ Usage:
     watcher.stop()   # graceful shutdown
 """
 
+from __future__ import annotations
+
 import logging
 import threading
 from pathlib import Path

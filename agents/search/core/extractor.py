@@ -7,6 +7,8 @@ both the SQLite parent store and the ChromaDB child metadata in one pass.
 Supported: .pdf, .docx, .pptx, .xlsx, .md, .txt
 """
 
+from __future__ import annotations
+
 import logging
 import warnings
 from datetime import datetime, timezone

@@ -13,6 +13,8 @@ Two entry points:
     index_file(file_path)        -- single file (used by the watcher)
 """
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 

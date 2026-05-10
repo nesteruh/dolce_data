@@ -6,6 +6,8 @@ BM25 / hybrid search removed -- ranking quality is handled by the LLM
 reranker in retrieval/searcher.py.
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 from pathlib import Path
