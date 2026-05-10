@@ -1,5 +1,5 @@
 """
-Action execution layer — registry-based.
+Action execution layer — registry-based. 
 
 Adding a new action requires exactly ONE thing: a function decorated with
 @action(...).  The registry auto-derives VALID_TYPES, type labels, default
